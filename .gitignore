@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+data/
+*.parquet
+*.zarr/
+*.osm.pbf
+node_modules/
+.next/
+out/
+.DS_Store

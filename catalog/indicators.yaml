@@ -1,0 +1,506 @@
+# Qualimap catalog: data sources, indicators and dimensions.
+# Validated by catalog/schema/indicators.schema.json  (qm catalog validate)
+#
+# Conventions
+#   - ids: lower_snake_case, unique within their section
+#   - refresh.every: ISO 8601 duration (P1D, P7D, P30D, P1Y); check: checksum | etag | always
+#   - normalize.method: linear | log_decay | percentile | lookup
+#     linear: score 10 at `good`, 0 at `bad` (works for both directions)
+#     log_decay: score 10 at d <= d0, 0 at d >= dmax, 5 at sqrt(d0*dmax)
+#     percentile: population-weighted mid-rank; direction higher_is_better | lower_is_better
+#   - Scores are stored as uint8 = round(score * 25); 255 = no data
+
+meta:
+  catalog_version: 0.1.0
+  grid: {system: a5, base_resolution: 16, export_resolutions: [11, 12, 13, 14, 15, 16]}
+  region: {id: CH, boundary_source: swisstopo_swissboundaries3d}
+  languages: [de, fr, it, en]
+  score_quantization: {scale: 25, nodata: 255}
+
+dimensions:
+  - id: noise
+    label: {en: Noise, de: Lärm, fr: Bruit, it: Rumore}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: air
+    label: {en: Air quality, de: Luftqualität, fr: Qualité de l'air, it: Qualità dell'aria}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: public_transport
+    label: {en: Public transport, de: Öffentlicher Verkehr, fr: Transports publics, it: Trasporti pubblici}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: taxation
+    label: {en: Taxation, de: Steuern, fr: Impôts, it: Imposte}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: education
+    label: {en: Education, de: Bildung, fr: Éducation, it: Istruzione}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: dining
+    label: {en: Dining, de: Gastronomie, fr: Restauration, it: Ristorazione}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: health
+    label: {en: Health care, de: Gesundheit, fr: Santé, it: Salute}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: culture
+    label: {en: Culture, de: Kultur, fr: Culture, it: Cultura}
+    default_weight: 1.0
+    ramp: sequential_good_high
+  - id: green
+    label: {en: Green space, de: Grünraum, fr: Espaces verts, it: Spazi verdi}
+    default_weight: 1.0
+    ramp: sequential_good_high
+
+sources:
+  # ---------------------------------------------------------------- swisstopo
+  - id: swisstopo_swissboundaries3d
+    provider: swisstopo
+    title: swissBOUNDARIES3D (national, cantonal and commune boundaries)
+    layer_id: ch.swisstopo.swissboundaries3d
+    kind: vector
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© swisstopo"}
+    fetch: {method: stac, collection: ch.swisstopo.swissboundaries3d, asset_media_type: application/geopackage+sqlite3}
+    refresh: {every: P30D, check: checksum}
+    used_for: [cell_universe, communes]
+
+  - id: swisstopo_swissbuildings3d
+    provider: swisstopo
+    title: swissBUILDINGS3D 3.0 building footprints
+    layer_id: ch.swisstopo.swissbuildings3d_3_0
+    kind: vector
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© swisstopo"}
+    fetch: {method: stac, collection: ch.swisstopo.swissbuildings3d_3_0, asset_media_type: application/x.filegdb+zip, per_tile: true}
+    refresh: {every: P90D, check: checksum}
+    used_for: [sealed_surface, footprints]
+
+  - id: swisstopo_swisstlm3d
+    provider: swisstopo
+    title: swissTLM3D topographic landscape model
+    layer_id: ch.swisstopo.swisstlm3d
+    kind: vector
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© swisstopo"}
+    fetch: {method: stac, collection: ch.swisstopo.swisstlm3d, asset_media_type: application/geopackage+sqlite3}
+    refresh: {every: P90D, check: checksum}
+    used_for: [water_mask, forest_crosscheck]
+
+  - id: swisstopo_basemap_vt
+    provider: swisstopo
+    title: Base map vector tiles (viewer only)
+    layer_id: ch.swisstopo.basemap.vt
+    kind: tiles
+    license: {id: swisstopo-commercial-with-permission, attribution: "© swisstopo"}
+    fetch: {method: none, url: "https://vectortiles.geo.admin.ch/styles/ch.swisstopo.basemap.vt/style.json"}
+    refresh: {every: P1Y, check: always}
+    used_for: [viewer_basemap]
+
+  # ---------------------------------------------------------------- FSO / BFS
+  - id: fso_gwr
+    provider: FSO
+    title: Federal Register of Buildings and Dwellings (GWR), public extract
+    layer_id: ch.bfs.gebaeude_wohnungs_register
+    kind: table
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BFS"}
+    fetch: {method: http, url: "${QM_GWR_URL}", format: csv}
+    refresh: {every: P30D, check: checksum}
+    used_for: [population_weights, residential_points, commune_assignment]
+
+  - id: fso_statpop
+    provider: FSO
+    title: STATPOP population, 100 m hectare grid
+    layer_id: ch.bfs.volkszaehlung-bevoelkerungsstatistik_einwohner
+    kind: table
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BFS"}
+    fetch: {method: http, url: "${QM_STATPOP_URL}", format: csv}
+    refresh: {every: P1Y, check: checksum}
+    used_for: [population_weights]
+
+  - id: fso_arealstatistik_nolc04
+    provider: FSO
+    title: Land Use Statistics, land cover NOLC04 (100 m sample points)
+    layer_id: ch.bfs.arealstatistik
+    kind: table
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY-ASK, attribution: "© BFS"}
+    fetch: {method: http, url: "${QM_NOLC04_URL}", format: csv}
+    refresh: {every: P1Y, check: checksum}
+    used_for: [green]
+
+  - id: fso_commune_register
+    provider: FSO
+    title: Official commune register (Amtliches Gemeindeverzeichnis)
+    kind: table
+    license: {id: OGD-CH-BY, attribution: "© BFS"}
+    fetch: {method: http, url: "${QM_COMMUNE_REGISTER_URL}", format: xml}
+    refresh: {every: P30D, check: checksum}
+    used_for: [communes, mergers]
+
+  # ---------------------------------------------------------------- ARE / transport
+  - id: are_oev_gueteklassen
+    provider: ARE
+    title: Public transport quality classes (ÖV-Güteklassen)
+    layer_id: ch.are.gueteklassen_oev
+    kind: vector
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© ARE"}
+    fetch: {method: stac, collection: ch.are.gueteklassen_oev, asset_media_type: application/geopackage+sqlite3}
+    refresh: {every: P30D, check: checksum}
+    used_for: [public_transport]
+
+  - id: ch_gtfs
+    provider: opentransportdata.swiss
+    title: Swiss public transport timetable (GTFS)
+    kind: table
+    license: {id: opentransportdata-terms, attribution: "© opentransportdata.swiss"}
+    fetch: {method: gtfs, url: "${QM_GTFS_URL}"}
+    refresh: {every: P7D, check: checksum}
+    used_for: [public_transport]
+
+  # ---------------------------------------------------------------- FOEN / BAFU noise
+  - id: foen_sonbase_road_day
+    provider: FOEN
+    title: sonBASE road traffic noise, day
+    layer_id: ch.bafu.laerm-strassenlaerm_tag
+    kind: raster
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAFU"}
+    fetch: {method: stac, collection: ch.bafu.laerm-strassenlaerm_tag, asset_media_type: image/tiff}
+    refresh: {every: P30D, check: checksum}
+    used_for: [noise]
+
+  - id: foen_sonbase_road_night
+    provider: FOEN
+    title: sonBASE road traffic noise, night
+    layer_id: ch.bafu.laerm-strassenlaerm_nacht
+    kind: raster
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAFU"}
+    fetch: {method: stac, collection: ch.bafu.laerm-strassenlaerm_nacht, asset_media_type: image/tiff}
+    refresh: {every: P30D, check: checksum}
+    used_for: [noise]
+
+  - id: foen_sonbase_rail_day
+    provider: FOEN
+    title: sonBASE railway noise, day
+    layer_id: ch.bafu.laerm-bahnlaerm_tag
+    kind: raster
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAFU"}
+    fetch: {method: stac, collection: ch.bafu.laerm-bahnlaerm_tag, asset_media_type: image/tiff}
+    refresh: {every: P30D, check: checksum}
+    used_for: [noise]
+
+  - id: foen_sonbase_rail_night
+    provider: FOEN
+    title: sonBASE railway noise, night
+    layer_id: ch.bafu.laerm-bahnlaerm_nacht
+    kind: raster
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAFU"}
+    fetch: {method: stac, collection: ch.bafu.laerm-bahnlaerm_nacht, asset_media_type: image/tiff}
+    refresh: {every: P30D, check: checksum}
+    used_for: [noise]
+
+  - id: foca_aerodrome_noise
+    provider: FOCA
+    title: Noise exposure cadastre for civil aerodromes
+    layer_id: ch.bazl.laermbelastungskataster-zivilflugplaetze
+    kind: vector
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAZL"}
+    fetch: {method: stac, collection: ch.bazl.laermbelastungskataster-zivilflugplaetze, asset_media_type: application/geopackage+sqlite3}
+    refresh: {every: P90D, check: checksum}
+    used_for: [noise]
+
+  # ---------------------------------------------------------------- FOEN / BAFU air
+  - id: foen_no2
+    provider: FOEN
+    title: Nitrogen dioxide (NO2), annual mean
+    layer_id: ch.bafu.luftreinhaltung-stickstoffdioxid
+    kind: raster
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAFU"}
+    fetch: {method: stac, collection: ch.bafu.luftreinhaltung-stickstoffdioxid, asset_media_type: application/zip}
+    refresh: {every: P30D, check: checksum}
+    used_for: [air]
+
+  - id: foen_pm10
+    provider: FOEN
+    title: Particulate matter PM10, annual mean
+    layer_id: ch.bafu.luftreinhaltung-feinstaub_pm10
+    kind: raster
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAFU"}
+    fetch: {method: stac, collection: ch.bafu.luftreinhaltung-feinstaub_pm10, asset_media_type: application/zip}
+    refresh: {every: P30D, check: checksum}
+    used_for: [air]
+
+  - id: foen_pm25
+    provider: FOEN
+    title: Particulate matter PM2.5, annual mean
+    layer_id: ch.bafu.luftreinhaltung-feinstaub_pm2_5
+    kind: raster
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BAFU"}
+    fetch: {method: stac, collection: ch.bafu.luftreinhaltung-feinstaub_pm2_5, asset_media_type: application/zip}
+    refresh: {every: P30D, check: checksum}
+    used_for: [air]
+
+  # ---------------------------------------------------------------- SFOE / BFE
+  - id: sfoe_sonnendach
+    provider: SFOE
+    title: Solar suitability of roofs (Sonnendach.ch)
+    layer_id: ch.bfe.solarenergie-eignung-daecher
+    kind: vector
+    crs: EPSG:2056
+    license: {id: OGD-CH-BY, attribution: "© BFE"}
+    fetch: {method: http, url: "https://data.geo.admin.ch/ch.bfe.solarenergie-eignung-daecher/solarenergie-eignung-daecher/solarenergie-eignung-daecher_2056.gdb.zip", format: filegdb}
+    refresh: {every: P90D, check: etag}
+    used_for: [rooftop_solar]
+
+  # ---------------------------------------------------------------- FTA / ESTV
+  - id: fta_tax_calculator
+    provider: FTA
+    title: Swiss tax calculator (income and wealth tax), per commune
+    kind: api
+    license: {id: unofficial-interface, attribution: "Source: ESTV tax calculator"}
+    fetch:
+      method: estv_api
+      base_url: https://swisstaxcalculator.estv.admin.ch/delegate/ost-integration/v1/lg-proxy/operation/c3b67379_ESTV
+      operations: [API_searchLocation, API_calculateDetailedTaxes]
+      rate_limit: {requests_per_second: 1, concurrency: 2}
+      params:
+        tax_year: 2026
+        relationship: married
+        revenue1: 87500
+        revenue2: 37500
+        revenue_type: employed
+        age1: 40
+        age2: 38
+        children_ages: [8]
+        fortune: 0
+        confession: none
+    refresh: {every: P30D, check: always}
+    used_for: [taxation]
+
+  # ---------------------------------------------------------------- OSM
+  - id: osm_switzerland
+    provider: Geofabrik / OpenStreetMap contributors
+    title: OpenStreetMap extract for Switzerland
+    kind: vector
+    crs: EPSG:4326
+    license: {id: ODbL-1.0, attribution: "© OpenStreetMap contributors"}
+    fetch: {method: osm_pbf, url: "https://download.geofabrik.de/europe/switzerland-latest.osm.pbf"}
+    refresh: {every: P7D, check: etag}
+    used_for: [education, dining, health, culture, walking_network]
+
+# Reusable OSM POI definitions, referenced by indicators below.
+osm_poi_groups:
+  childcare:      {tags: ["amenity=kindergarten", "amenity=childcare"]}
+  school:         {tags: ["amenity=school"]}
+  tertiary:       {tags: ["amenity=college", "amenity=university"]}
+  restaurant:     {tags: ["amenity=restaurant", "amenity=food_court"]}
+  cafe:           {tags: ["amenity=cafe", "amenity=ice_cream", "amenity=fast_food"]}
+  bar:            {tags: ["amenity=bar", "amenity=pub", "amenity=biergarten"]}
+  general_practice: {tags: ["amenity=doctors", "healthcare=doctor", "healthcare=centre", "amenity=clinic", "healthcare=clinic"]}
+  pharmacy:       {tags: ["amenity=pharmacy", "healthcare=pharmacy"]}
+  hospital:       {tags: ["amenity=hospital", "healthcare=hospital"]}
+  dentist:        {tags: ["amenity=dentist", "healthcare=dentist"]}
+  allied_care:    {tags: ["healthcare=physiotherapist", "healthcare=psychotherapist", "healthcare=midwife", "healthcare=optometrist", "healthcare=podiatrist", "healthcare=speech_therapist", "healthcare=occupational_therapist"]}
+  museum_gallery: {tags: ["tourism=museum", "tourism=gallery"]}
+  performing_arts: {tags: ["amenity=theatre", "amenity=cinema", "amenity=arts_centre", "amenity=music_venue"]}
+  library_community: {tags: ["amenity=library", "amenity=community_centre"]}
+
+indicators:
+  # ---------------------------------------------------------------- Noise
+  - id: noise
+    dimension: noise
+    title: {en: Effective noise level, de: Effektiver Lärmpegel, fr: Niveau de bruit effectif, it: Livello di rumore effettivo}
+    inputs: [foen_sonbase_road_day, foen_sonbase_road_night, foen_sonbase_rail_day, foen_sonbase_rail_night, foca_aerodrome_noise, fso_gwr, fso_statpop]
+    transform:
+      fn: qualimap.transforms.noise:effective_level
+      version: 1
+      params: {night_offset_db: 10, background_db: 35}
+    unit: dB(A)
+    aggregation: pop_weighted_energetic_mean
+    normalize: {method: linear, good: 45, bad: 65}
+    qa:
+      - {check: range, min: 20, max: 95}
+      - {check: nodata_share_settlement, max: 0.01}
+
+  # ---------------------------------------------------------------- Air
+  - id: air
+    dimension: air
+    title: {en: Air quality vs. legal limits, de: Luftqualität gegenüber Grenzwerten, fr: Qualité de l'air par rapport aux valeurs limites, it: Qualità dell'aria rispetto ai valori limite}
+    inputs: [foen_no2, foen_pm10, foen_pm25, fso_gwr, fso_statpop]
+    transform:
+      fn: qualimap.transforms.air:limiting_pollutant
+      version: 1
+      params:
+        limits_profile: LRV_current
+        profiles:
+          LRV_current: {no2: 30, pm10: 20, pm25: 10}
+          EKL_recommended: {no2: 30, pm10: 15, pm25: 5}
+    unit: ratio_to_limit
+    aggregation: pop_weighted_mean
+    normalize: {method: linear, good: 0.5, bad: 1.5}
+    qa:
+      - {check: range, min: 0, max: 5}
+      - {check: compare_reference, reference: foen_national_mean, max_rel_diff: 0.05}
+
+  # ---------------------------------------------------------------- Public transport
+  - id: public_transport
+    dimension: public_transport
+    title: {en: Public transport quality, de: ÖV-Erschliessungsgüte, fr: Qualité de la desserte TP, it: Qualità del servizio TP}
+    inputs: [are_oev_gueteklassen, ch_gtfs]
+    transform:
+      fn: qualimap.transforms.public_transport:are_classes
+      version: 1
+      params:
+        mode: polygons            # polygons (ARE layer) | gtfs (recompute + continuous refinement)
+        window: ["06:00", "20:00"]
+        class_scores: {A: 10, B: 7.5, C: 5, D: 2.5, none: 0}
+        distance_bands_m: [300, 500, 750, 1000]
+    unit: class
+    aggregation: area_mean
+    normalize: {method: lookup}
+    qa:
+      - {check: agreement_with_reference, reference: are_oev_gueteklassen, min: 0.97, applies_when: {mode: gtfs}}
+
+  # ---------------------------------------------------------------- Taxation
+  - id: taxation
+    dimension: taxation
+    title: {en: Tax burden (reference household), de: Steuerbelastung (Referenzhaushalt), fr: Charge fiscale (ménage de référence), it: Carico fiscale (economia domestica di riferimento)}
+    inputs: [fta_tax_calculator, fso_commune_register, fso_gwr, fso_statpop]
+    transform:
+      fn: qualimap.transforms.taxation:commune_total_tax
+      version: 1
+      params: {include_church_tax: false}
+    unit: CHF
+    level: commune               # computed per commune, broadcast to cells
+    aggregation: commune_broadcast
+    normalize: {method: percentile, direction: lower_is_better, weight: population}
+    qa:
+      - {check: golden_values, file: tests/golden/taxation_capitals.json, tolerance_chf: 1}
+
+  # ---------------------------------------------------------------- POI access (shared transform)
+  - id: education
+    dimension: education
+    title: {en: Access to education, de: Erreichbarkeit Bildung, fr: Accès à l'éducation, it: Accesso all'istruzione}
+    inputs: [osm_switzerland]
+    transform:
+      fn: qualimap.transforms.poi_access:network_decay
+      version: 1
+      params:
+        network: walk
+        subtypes:
+          - {group: childcare, weight: 0.30, d0: 300, dmax: 2000, k: 1}
+          - {group: school, weight: 0.50, d0: 400, dmax: 2500, k: 1}
+          - {group: tertiary, weight: 0.20, d0: 2000, dmax: 20000, k: 1}
+    unit: score
+    aggregation: pop_weighted_mean
+    normalize: {method: log_decay}
+    qa:
+      - {check: count_delta_vs_previous, max_rel: 0.10, per: canton}
+
+  - id: dining
+    dimension: dining
+    title: {en: Access to restaurants and cafés, de: Erreichbarkeit Gastronomie, fr: Accès à la restauration, it: Accesso alla ristorazione}
+    inputs: [osm_switzerland]
+    transform:
+      fn: qualimap.transforms.poi_access:network_decay
+      version: 1
+      params:
+        network: walk
+        subtypes:
+          - {group: restaurant, weight: 0.45, d0: 200, dmax: 2000, k: 3}
+          - {group: cafe, weight: 0.30, d0: 150, dmax: 1500, k: 3}
+          - {group: bar, weight: 0.25, d0: 200, dmax: 2000, k: 2}
+    unit: score
+    aggregation: pop_weighted_mean
+    normalize: {method: log_decay}
+    qa:
+      - {check: count_delta_vs_previous, max_rel: 0.10, per: canton}
+
+  - id: health
+    dimension: health
+    title: {en: Access to health care, de: Erreichbarkeit Gesundheit, fr: Accès aux soins, it: Accesso alle cure}
+    inputs: [osm_switzerland]
+    transform:
+      fn: qualimap.transforms.poi_access:network_decay
+      version: 1
+      params:
+        network: walk
+        subtypes:
+          - {group: general_practice, weight: 0.40, d0: 400, dmax: 5000, k: 2}
+          - {group: pharmacy, weight: 0.25, d0: 300, dmax: 3000, k: 1}
+          - {group: hospital, weight: 0.20, d0: 2000, dmax: 25000, k: 1}
+          - {group: dentist, weight: 0.10, d0: 500, dmax: 5000, k: 1}
+          - {group: allied_care, weight: 0.05, d0: 500, dmax: 5000, k: 1}
+    unit: score
+    aggregation: pop_weighted_mean
+    normalize: {method: log_decay}
+    qa:
+      - {check: count_delta_vs_previous, max_rel: 0.10, per: canton}
+
+  - id: culture
+    dimension: culture
+    title: {en: Access to culture, de: Erreichbarkeit Kultur, fr: Accès à la culture, it: Accesso alla cultura}
+    inputs: [osm_switzerland]
+    transform:
+      fn: qualimap.transforms.poi_access:network_decay
+      version: 1
+      params:
+        network: walk
+        subtypes:
+          - {group: museum_gallery, weight: 0.30, d0: 500, dmax: 10000, k: 2}
+          - {group: performing_arts, weight: 0.40, d0: 500, dmax: 10000, k: 2}
+          - {group: library_community, weight: 0.30, d0: 400, dmax: 5000, k: 1}
+    unit: score
+    aggregation: pop_weighted_mean
+    normalize: {method: log_decay}
+    qa:
+      - {check: count_delta_vs_previous, max_rel: 0.10, per: canton}
+
+  # ---------------------------------------------------------------- Green
+  - id: green
+    dimension: green
+    title: {en: Green space and tree canopy, de: Grünflächen und Baumkronen, fr: Espaces verts et canopée, it: Spazi verdi e chioma arborea}
+    inputs: [fso_arealstatistik_nolc04, swisstopo_swissbuildings3d, swisstopo_swisstlm3d]
+    transform:
+      fn: qualimap.transforms.green:neighbourhood_shares
+      version: 1
+      params:
+        radius_m: 300
+        class_map: catalog/maps/nolc04_classes.csv
+        blend: {green_share: 0.4, canopy_share: 0.3, sealed_share: 0.3}
+        linear:
+          green_share: {good: 0.60, bad: 0.10}
+          canopy_share: {good: 0.40, bad: 0.05}
+          sealed_share: {good: 0.10, bad: 0.60}
+    unit: score
+    aggregation: area_mean
+    normalize: {method: linear, good: 10, bad: 0}
+    qa:
+      - {check: compare_reference, reference: fso_commune_green_share, max_abs_diff: 0.03}
+
+  # ---------------------------------------------------------------- Context layers (not scored)
+  - id: rooftop_solar
+    dimension: null
+    scored: false
+    title: {en: Rooftop solar suitability, de: Solareignung Dächer, fr: Potentiel solaire des toits, it: Idoneità solare dei tetti}
+    inputs: [sfoe_sonnendach, fso_gwr]
+    transform:
+      fn: qualimap.transforms.solar:best_roof_class
+      version: 1
+    unit: class
+    aggregation: max
+    normalize: {method: lookup}
