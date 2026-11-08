@@ -484,7 +484,7 @@ indicators:
       fn: qualimap.transforms.green:neighbourhood_shares
       version: 1
       params:
-        radius_m: 300
+        radius_m: 300                # neighbourhood via a5_spherical_cap(cell_id, radius_m)
         class_map: catalog/maps/nolc04_classes.csv
         blend: {green_share: 0.4, canopy_share: 0.3, sealed_share: 0.3}
         linear:

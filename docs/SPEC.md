@@ -106,27 +106,60 @@ Commune polygons (swissBOUNDARIES3D) are an additional, non-A5 aggregation level
 
 ### 3.3 Grid operations used
 
-| Operation | Python (`pya5`) | DuckDB (`a5` ext.) | Browser (`a5-js`) |
-| --- | --- | --- | --- |
-| Point → cell | `lonlat_to_cell((lon, lat), res)` | `a5_lonlat_to_cell(lon, lat, res)` | `lonLatToCell` |
-| Cell → centroid | `cell_to_lonlat` | `a5_cell_to_lonlat` | `cellToLonLat` |
-| Cell → polygon | `cell_to_boundary` | `a5_cell_to_boundary` | `cellToBoundary` |
-| Parent / children | `cell_to_parent`, `cell_to_children` | `a5_cell_to_parent`, `a5_cell_to_children` | same names |
-| Polygon fill | `polygon_to_cells` | — (use Python) | — |
-| Neighbourhood | `grid_disk` | — (use Python) | — |
-| Compaction | `compact` / `uncompact` | `a5_compact` | — |
+The DuckDB extension is the primary engine for grid work: it covers every operation the
+pipeline needs, including polygon coverings and metric-radius neighbourhoods, so most stages
+are SQL over Parquet. `pya5` is used where Python is already in the loop (raster batches,
+tests), and `a5-js` in the browser.
 
-Browser names are the camelCase equivalents in `a5-js`; confirm exact signatures against the
-pinned version. Argument order is **longitude, latitude** throughout. Early versions of the DuckDB extension
-exposed `a5_cell(lat, lon, res)`; the pipeline pins the extension version and only uses
-`a5_lonlat_to_cell`.
+| Operation | DuckDB (`a5` ext.) | Python (`pya5`) | Browser (`a5-js`) |
+| --- | --- | --- | --- |
+| Point → cell | `a5_lonlat_to_cell(lon, lat, res)` | `lonlat_to_cell((lon, lat), res)` | `lonLatToCell([lon, lat], res)` |
+| Cell → centre | `a5_cell_to_lonlat`, `a5_cell_to_point` (GEOMETRY) | `cell_to_lonlat` | `cellToLonLat` |
+| Cell → polygon | `a5_cell_to_boundary` (ring), `a5_cell_to_geometry` (GEOMETRY, WKB) | `cell_to_boundary` | `cellToBoundary(cell, {closedRing, segments})` |
+| Geometry → cells | `a5_geometry_to_cells(geom, res, overlapping := true)` | `polygon_to_cells` | — |
+| Parent / children | `a5_cell_to_parent(cell, res)`, `a5_cell_to_children(cell, res)` | `cell_to_parent`, `cell_to_children` | `cellToParent`, `cellToChildren` |
+| Neighbours (k steps) | `a5_grid_disk(cell, k)`, `a5_grid_disk_vertex(cell, k)` | `grid_disk`, `grid_disk_vertex` | — |
+| Metric radius | `a5_spherical_cap(cell, radius_m)` | `spherical_cap` | — |
+| Coverings | `a5_compact`, `a5_uncompact`, `a5_union`, `a5_intersect`, `a5_difference`, `a5_contains` | same names | — |
+| Cell area / edge | `a5_cell_area(res)`, `a5_cell_edge_length_avg(res)` | `cell_area`, `cell_edge_length_avg` | — |
+| Hex ⇄ u64 | `a5_u64_to_hex`, `a5_hex_to_u64` | `u64_to_hex`, `hex_to_u64` | `u64ToHex`, `hexToU64` |
+
+Rules that follow from the A5 and extension documentation:
+
+- **Argument order is longitude, latitude** everywhere (GeoJSON order). Set
+  `SET geometry_always_xy = true` in every DuckDB session.
+- **Version pinning is mandatory.** A5 1.0 changed IDs at resolution 2 and finer. DuckDB
+  versions before 1.5.6 install a build with the legacy v0 IDs. Install per DuckDB version:
+  - DuckDB 1.5.6+: `INSTALL a5 FROM community; LOAD a5;`
+  - DuckDB 2.0+: add the Query.Farm repository, then `INSTALL a5 FROM query_farm; LOAD a5 FROM query_farm;`
+  - After any DuckDB upgrade: `FORCE INSTALL`. `qm doctor` checks a set of fixed test points
+    and fails if the DuckDB extension, `pya5` and `a5-js` return different IDs.
+- **Coverings carry a marker.** `a5_geometry_to_cells` for polygons and `a5_compact` return a
+  compacted covering whose last element is a compaction marker, not a cell. Always
+  `a5_uncompact` before unnesting, joining or drawing.
+- **Cell area** comes from `a5_cell_area(res)` (exact, identical for all cells at a
+  resolution), never from boundary geometry.
+- **Set operations** (`a5_union`, `a5_contains`, …) require both inputs at the same
+  resolution.
+- **JavaScript IDs** are `bigint`. Hex strings are used only where JSON must carry an ID
+  (`catalog.json`, URL fragments); binary paths keep `BigUint64Array` (Parquet `UINT64`).
 
 ### 3.4 Cell universe
 
 1. Load the national boundary (swissBOUNDARIES3D `TLM_LANDESGEBIET`, `ICC = 'CH'`), densify
    to 50 m segments in LV95, reproject to WGS84.
-2. `a5.polygon_to_cells(boundary, 16)` → ~5.21 M IDs. Partition the work by the res-11
-   parents that intersect the boundary.
+2. Cover it in DuckDB and expand the covering:
+
+   ```sql
+   SET geometry_always_xy = true;
+   CREATE TABLE universe AS
+   SELECT unnest(a5_uncompact(a5_geometry_to_cells(geom, 16, overlapping := true))) AS cell_id
+   FROM boundary;   -- ~5.21 M cells
+   ```
+
+   `overlapping := true` keeps border cells whose centre lies outside but which touch the
+   boundary; `in_ch_share` (below) records how much of each lies inside. For memory headroom
+   the same query can run per res-11 parent (covering of boundary ∩ parent).
 3. Store as `cells/universe_r16.parquet`, sorted by `cell_id`, with columns `cell_id UINT64`,
    `parent_r11..r15 UINT64`, `lon`, `lat` (centroid, float64), `in_ch_share` (share of cell
    area inside the boundary, 0–1), `is_water` (bool), `commune_bfs` (UINT16, majority commune).
@@ -139,10 +172,17 @@ exposed `a5_cell(lat, lon, res)`; the pipeline pins the extension version and on
 - **Rasters** (noise, air): zonal statistics of each cell polygon with `exactextract`,
   batched per res-11 parent so each batch reads one raster window. Population-weighted
   sampling at building points, where an indicator needs it, follows the VivaMap methodology.
-- **Polygons** (communes, noise contours, quality classes): cell centroid in polygon for
-  interior cells; exact area shares for cells crossing a boundary.
-- **Neighbourhoods** (green share within 300 m): `grid_disk(cell, k)` with
-  k = ceil(300 m / mean centroid spacing at res 16), the spacing measured once per build.
+- **Polygons** (communes, noise contours, quality classes): `a5_geometry_to_cells(geom, 16)`
+  (centre containment, the default) assigns interior cells in one pass; cells from the
+  `overlapping := true` covering that are not in the default covering are boundary cells, and
+  only those get exact area shares via `ST_Intersection(a5_cell_to_geometry(cell_id), geom)`.
+- **Neighbourhoods** (green share within 300 m): `a5_spherical_cap(cell_id, 300)` returns the
+  cells within a metric radius, so no step count has to be derived from the edge length.
+  `a5_grid_disk(cell_id, k)` is used where a topological neighbourhood is wanted (smoothing,
+  gap filling).
+- Joining on `cell_id` replaces geometric predicates everywhere after this step; the
+  extension authors note that probing an indexed cell column is much cheaper than
+  `ST_DWithin` or `ST_Intersects` on raw geometries.
 
 ### 3.6 Roll-up
 
@@ -274,7 +314,7 @@ for tabular and SQL access; GeoZarr is a derived, array-oriented view.
 | Column | Type | Notes |
 | --- | --- | --- |
 | `cell_id` | UINT64 | A5 ID, primary key, **sort key** |
-| `geometry` | WKB Point | Cell centroid. Polygons are derived client-side from `cell_id`, keeping the file small |
+| `geometry` | WKB Point | Cell centre from `a5_cell_to_point(cell_id)`. Polygons are derived client-side from `cell_id`, keeping the file small |
 | `bbox` | STRUCT(xmin, ymin, xmax, ymax FLOAT) | GeoParquet 1.1 bbox covering column, for clients without A5 support |
 | `commune_bfs` | UINT16 | Majority commune (BFS number) |
 | `pop` | FLOAT32 | Residents (dasymetric estimate) |
@@ -490,7 +530,7 @@ Built with Typer. Global options: `--catalog PATH` (repeatable), `--env FILE`,
 | `qm inspect commune <bfs\|name>` | Commune values and ranks | |
 | `qm gc` | Apply retention rules to `raw/`, `staged/`, `cells/`, `indicators/` | `--keep-raw 3`, `--dry-run` |
 | `qm cors apply` | Apply the CORS rules to the public bucket | |
-| `qm doctor` | Check credentials, bucket access, CORS, DuckDB extensions, A5 versions | |
+| `qm doctor` | Check credentials, bucket access, CORS, DuckDB ≥ 1.5.6 with A5 v1 extension, and identical test-vector IDs across DuckDB, `pya5` and `a5-js` | |
 | `qm shell` | Interactive Python prompt (IPython) with `catalog`, `store`, `duck` (DuckDB connection with `spatial` + `a5` loaded) and `a5` preloaded | `--release <version>` |
 
 Example session:
@@ -567,11 +607,19 @@ XYZ tiles**:
   data cells), with a floor of 11, so at res 16 a tile is a res-11 cell.
 - Level selection follows the zoom table in 10.5; tiles are cached by `(release, res, tile_id)`.
 - Each tile's `getTileData` returns `{cellIds: BigUint64Array, values: …}` from the format
-  reader (Parquet or Zarr). `renderSubLayers` returns an `A5Layer` over that tile with binary
-  data: `data = {length}`, `getPentagon: (_, {index}) => cellIds[index]`, and colours from a
-  precomputed `Uint8Array` RGBA buffer.
-- Pentagon boundaries are computed once per tile in a Web Worker with `a5-js` and cached
-  with the tile, so pans and weight changes never recompute geometry.
+  reader (Parquet or Zarr).
+- **Rendering, two steps:**
+  1. **v0 (simplest):** `renderSubLayers` returns deck.gl's `A5Layer` for the tile with
+     `data = {length}`, `getPentagon: (_, {index}) => cellIds[index]` (`getPentagon` accepts a
+     `bigint` or a hex string) and `getFillColor` reading a precomputed RGBA buffer.
+     `A5Layer` is a composite layer whose `cell` sublayer is a `PolygonLayer`; it computes
+     boundaries itself, and its documentation does not describe binary-attribute input.
+  2. **v1 (fast path):** compute boundaries once per tile in a Web Worker with
+     `cellToBoundary(cell, {closedRing: true, segments: 1})` (6 vertices per pentagon at
+     these resolutions), pack them into flat `Float32Array` positions plus `startIndices`, and
+     render a `SolidPolygonLayer` with binary attributes. Weight changes then only replace the
+     colour attribute. Switch when the M3 benchmark shows `A5Layer` above budget at res 16.
+- Geometry is cached with the tile, so pans and weight changes never recompute it.
 
 ### 10.3 `A5ParquetLayer`
 
@@ -691,7 +739,7 @@ qualimap/
   docker/pipeline.Dockerfile
 ```
 
-Python 3.12; key dependencies: `pya5`, `duckdb` (with `spatial` and community `a5`),
+Python 3.12; key dependencies: `pya5` ≥ 1.0, `duckdb` ≥ 1.5.6 (with `spatial` and the A5 v1 `a5` extension),
 `pyarrow`, `geopandas`, `shapely` 2, `pyproj`, `rasterio`, `exactextract`, `zarr` 3,
 `xarray`, `xdggs`, `obstore`, `httpx`, `pystac-client`, `typer`, `rich`, `ipython`,
 `pydantic` (catalog models), `jsonschema`.
@@ -719,7 +767,7 @@ Python 3.12; key dependencies: `pya5`, `duckdb` (with `spatial` and community `a
    e.g. OSM ODbL share-alike for OSM-derived layers, FSO "open use, must provide source").
 2. Base resolution 16 versus 15: res 16 gives ~5.2 M cells (~150 MB Parquet); res 15 would
    quarter the size if street-level detail is not needed.
-3. Whether the `a5` DuckDB extension's WASM build works in DuckDB-WASM (spike in M3).
+3. Whether the `a5` DuckDB extension runs in DuckDB-WASM. Query.Farm's compatibility table lists WASM as not available, while its own browser examples run on Haybarn-Wasm. The viewer does not depend on it; test it in M3 for the analysis panel.
 4. Proposing `a5` as a registered name in the Zarr DGGS convention and in xdggs.
 5. Hosting for heavy jobs (OSM walking-network routing over all of Switzerland): GitHub
    runners versus a small dedicated VM.
@@ -734,8 +782,11 @@ Python 3.12; key dependencies: `pya5`, `duckdb` (with `spatial` and community `a
 
 ## References
 
-- A5: <https://a5geo.org>, Python package `pya5` (PyPI), TypeScript `a5-js`, DuckDB community
-  extension `a5` (<https://duckdb.org/community_extensions/extensions/a5>)
+- A5: <https://a5geo.org>, indexing API <https://a5geo.org/docs/api-reference/indexing>,
+  DuckDB quickstart <https://a5geo.org/docs/quickstart/duckdb>; Python `pya5` (PyPI);
+  TypeScript `a5-js`
+- DuckDB `a5` extension: <https://query.farm/products/extensions/a5/>,
+  <https://duckdb.org/community_extensions/extensions/a5>
 - deck.gl A5Layer: <https://deck.gl/docs/api-reference/geo-layers/a5-layer>
 - deck.gl-raster `ZarrLayer`: <https://developmentseed.org/deck.gl-raster/api/deck-gl-zarr/>,
   <https://developmentseed.org/deck.gl-raster/blog/initial-geozarr/>
