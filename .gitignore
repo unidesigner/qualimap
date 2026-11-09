@@ -13,3 +13,4 @@ node_modules/
 out/
 .DS_Store
 apps/web/public/duckdb/
+.qm/

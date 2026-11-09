@@ -38,6 +38,15 @@ def gc(env: Env, keep_raw: int = 3, dry_run: bool = False) -> dict:
     return {"removed": removed, "dry_run": dry_run}
 
 
+def s3_client(s):
+    """Plain botocore S3 client (botocore comes with s3fs; no separate boto3 pin needed)."""
+    import botocore.session
+
+    return botocore.session.get_session().create_client(
+        "s3", endpoint_url=s.s3_endpoint, region_name=s.s3_region,
+        aws_access_key_id=s.s3_key_id, aws_secret_access_key=s.s3_secret)
+
+
 def cors_rules(origins: list[str]) -> dict:
     return {"CORSRules": [{
         "AllowedOrigins": origins or ["*"],
@@ -56,10 +65,7 @@ def cors_apply(env: Env, dry_run: bool = False) -> dict:
     bucket = env.pub.url[len("s3://"):].split("/")[0]
     if dry_run:
         return {"applied": False, "bucket": bucket, "rules": rules, "dry_run": True}
-    import boto3
-
-    client = boto3.client("s3", endpoint_url=s.s3_endpoint, region_name=s.s3_region,
-                          aws_access_key_id=s.s3_key_id, aws_secret_access_key=s.s3_secret)
+    client = s3_client(s)
     client.put_bucket_cors(Bucket=bucket, CORSConfiguration=rules)
     return {"applied": True, "bucket": bucket, "rules": rules}
 
@@ -100,11 +106,7 @@ def doctor(env: Env, check_network: bool = True) -> list[dict]:
     add("pya5 >= 1.0", _pya5_ok(), getattr(a5, "BACKEND", ""))
     if env.pub.url.startswith("s3://") and check_network:
         try:
-            import boto3
-
-            s = env.settings
-            client = boto3.client("s3", endpoint_url=s.s3_endpoint, region_name=s.s3_region,
-                                  aws_access_key_id=s.s3_key_id, aws_secret_access_key=s.s3_secret)
+            client = s3_client(env.settings)
             cfg = client.get_bucket_cors(Bucket=env.pub.url[5:].split("/")[0])
             ranged = any("Range" in r.get("AllowedHeaders", []) for r in cfg.get("CORSRules", []))
             add("public bucket CORS allows Range", ranged)

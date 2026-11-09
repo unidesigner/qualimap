@@ -1,6 +1,6 @@
 # Qualimap — Technical Specification
 
-Status: Draft v0.1 · 2026-11-07
+Status: Draft v0.2 · 2026-11-09 (v0 implementation in this repository; Section 14 lists where it deviates from earlier drafts)
 Scope: Switzerland first; grid, formats and catalog designed to extend to Europe and beyond.
 
 Qualimap publishes quality-of-life maps on the **A5** discrete global grid. A scheduled
@@ -231,7 +231,7 @@ for population weights.
 | `qualimap-pub` | Public read | `releases/<version>/…`, `releases/latest.json` |
 
 Access goes through B2's S3-compatible API, so all tooling uses generic S3 clients
-(`obstore` or `fsspec`/`s3fs` in Python, `rclone` for bulk ops). Configuration comes from the
+(`fsspec`/`s3fs` in Python, `rclone` for bulk ops). Configuration comes from the
 environment only:
 
 ```text
@@ -268,6 +268,8 @@ qualimap-pub/
   releases/<version>/parquet/cells_r{11..15}.parquet
   releases/<version>/parquet/communes.parquet
   releases/<version>/parquet/pois.parquet
+  releases/<version>/arrow/communes.arrow          # same tables as Arrow IPC with interleaved
+  releases/<version>/arrow/pois.arrow              #   GeoArrow, for the viewer (Section 6.3)
   releases/<version>/zarr/qualimap.zarr/…          # A5 cell indicators (DGGS convention)
   releases/<version>/zarr/rasters/<source_id>.zarr/…  # raster context layers (GeoZarr)
   releases/<version>/catalog.json         # resolved catalog: indicators, labels, legends
@@ -296,9 +298,12 @@ what is due:
 qm run --due            # fetch due sources → rebuild affected indicators → export → publish
 ```
 
-- **Phase 1:** a GitHub Actions workflow runs `qm run --due` daily at 02:17 UTC in a pinned
-  container image (`ghcr.io/unidesigner/qualimap-pipeline:<sha>`). Heavy national jobs
-  (OSM routing, raster zonal stats) can target a self-hosted runner via a job label.
+- **Phase 1:** a GitHub Actions workflow (`.github/workflows/pipeline.yml`) runs
+  `qm run --due` daily at 02:17 UTC: it installs the pipeline package, runs `qm doctor`, and
+  treats exit code 3 ("nothing due") as success. Bucket settings and upstream URLs come from
+  repository variables, credentials from secrets (template: `.env.example`). Heavy national
+  jobs (OSM routing, raster zonal stats) can target a self-hosted runner using the image from
+  `docker/pipeline.Dockerfile`.
 - **Phase 2:** the same image runs under Dagster (or Prefect): each catalog source becomes an
   asset, each indicator an asset depending on its inputs. The CLI stays the single
   implementation; the orchestrator only calls it.
@@ -322,6 +327,11 @@ The catalog defines a DAG: `source → indicator → dimension → release`. On 
 - Every indicator has QA checks (Section 9). A failed check blocks publication of the release
   but not of the run record, so the failure can be inspected.
 - Notifications: failures post to a webhook (`QM_ALERT_WEBHOOK`) with the run ID.
+- Exit codes of `qm run`: 0 published, 1 failed, 2 QA blocked the `latest.json` switch,
+  3 nothing to do.
+- Sources whose fetch needs staged data from another source (the ESTV tax API needs the
+  commune register to enumerate communes) are fetched after the other sources have been
+  staged, in the same run.
 
 ---
 
@@ -348,9 +358,11 @@ for tabular and SQL access; GeoZarr is a derived, array-oriented view.
 **Physical layout** (this is what makes browser queries cheap):
 
 - Rows sorted by `cell_id`, so A5's contiguous descendant ranges map to contiguous row ranges.
-- One row group per res-11 parent, giving ~5,100 row groups of ~1,000 rows at res 16. Row
-  group min/max statistics on `cell_id` let a reader skip every row group outside the
-  requested ranges. Parquet page index enabled.
+- One row group per **tile**: the ancestor at the tile resolution `max(r − 5, 0)` (res 11 for
+  res 16), so a row group holds the ≤ 1,024 descendants of one tile cell, ~5,100 row groups of
+  ~1,000 rows at res 16. Row group min/max statistics on `cell_id` identify each group's tile
+  without an extra index. Parquet page index enabled. The tile resolutions per file are listed
+  in `catalog.json` (`tile_resolutions`).
 - ZSTD level 9; dictionary encoding for `q_*` and `commune_bfs`.
 - Footer metadata: `geo` (GeoParquet 1.1, CRS OGC:CRS84), plus `qualimap` key with release
   version, A5 resolution and A5 library version.
@@ -362,17 +374,18 @@ measured). Coarser files are a few MB each.
 
 | Path | Library | Use |
 | --- | --- | --- |
-| Viewport fetch | `hyparquet` (pure JS) | Read footer once, select row groups whose `cell_id` range intersects the viewport's res-11 cells, fetch only needed columns |
+| Viewport fetch | `hyparquet` + `hyparquet-compressors` (ZSTD) | Read footer once, map tile → row group from the `cell_id` statistics, fetch only the needed columns of the tiles in view |
 | Ad-hoc SQL | DuckDB-WASM + `a5` community extension | `SELECT … FROM 'https://…/cells_r16.parquet' WHERE cell_id BETWEEN ? AND ?`; commune rankings, filters, histograms |
 
 DuckDB-WASM loads community extensions in the browser; whether the `a5` extension's WASM
 build works end to end must be confirmed in the first viewer spike. Range filtering works
 without it, because IDs and ranges can be computed with `a5-js`.
 
-**Viewport → ID ranges:** compute the res-11 cells covering the viewport with `a5-js`; for
-each, the descendant range at the target resolution is
-`[cellToChildren(c, r)[0], cellToChildren(c, r).at(-1)]`, computed once and cached. (A
-closed-form range function is preferable; track an upstream feature request.)
+**Viewport → tiles:** A5 cells are hierarchical by ID but **not geometrically nested**: the
+descendants of a cell spill well outside its own pentagon (a res-7 cell's res-12 descendants
+reach ~0.4° beyond it). The tiles for a viewport are therefore the tile-resolution parents of
+the data-resolution cells covering the viewport (`polygonToCells` at r, then `cellToParent`),
+not the tile-resolution cells overlapping it. Each tile is then one row group.
 
 ### 6.2 GeoZarr (`zarr/qualimap.zarr`, Zarr v3)
 
@@ -388,7 +401,8 @@ qualimap.zarr/
     cell_ids     uint64 [N16]     chunks 65,536
     q_noise      uint8  [N16]     chunks 65,536, zstd
     …            (one array per indicator, raw_* as float32)
-    parent_index uint64 [N11, 2]  # per res-11 parent: [first_row, row_count]
+    tile_ids     uint64 [T]       # tile cells (res r − 5), sorted
+    tile_index   uint64 [T, 2]    # per tile: [first_row, row_count]
   r15/ … r11/                     # same structure
 ```
 
@@ -414,8 +428,8 @@ Example DGGS attributes on `r16/zarr.json`:
 - **Gap to close:** published DGGS-convention examples use `healpix` and `h3`; an A5 entry
   (name and indexing scheme) is not yet documented there. Qualimap writes `name: "a5"`
   and should propose it upstream (zarr-conventions/dggs, xdggs).
-- `parent_index` gives the viewer O(1) access to any res-11 parent's rows without reading
-  `cell_ids` first: one small read, then one chunk-range read per array.
+- `tile_ids` + `tile_index` give the viewer direct access to any tile's rows without reading
+  `cell_ids` first: one small read per resolution, then one chunk-range read per array.
 - Browser access with `zarrita.js` over HTTP range requests.
 
 **When to use which:** the viewer uses Parquet for viewport data and attribute panels, and
@@ -424,9 +438,11 @@ Zarr with xarray/xdggs and Parquet with DuckDB, pandas or QGIS.
 
 ### 6.3 Communes
 
-`parquet/communes.parquet`: one row per commune with simplified polygon geometry in
-GeoArrow-native encoding (GeoParquet 1.1, CRS84), `commune_bfs`, `name`, `canton`, `pop`,
-and `q_*` / `raw_*` columns, so communes render in deck.gl without A5 decoding (Section 10).
+`parquet/communes.parquet`: one row per commune with simplified polygon geometry (GeoParquet
+1.1, WKB, CRS84, bbox covering column), `commune_bfs`, `name`, `canton`, `pop`, and `q_*` /
+`raw_*` columns. For the viewer the same table is also written as
+`arrow/communes.arrow`: Arrow IPC with **interleaved GeoArrow** multipolygons, which deck.gl's
+GeoArrow layers take without any decoding in the browser (Section 10.6).
 
 ### 6.4 Raster GeoZarr context layers (`zarr/rasters/<source_id>.zarr`)
 
@@ -443,9 +459,10 @@ raster GeoZarr so the viewer can overlay the continuous source field under the A
 
 ### 6.5 Points of interest (`parquet/pois.parquet`)
 
-The OSM POIs used by the access indicators, one row per POI: GeoArrow point geometry (CRS84),
+The OSM POIs used by the access indicators, one row per POI: point geometry (WKB, CRS84),
 `group` (catalog `osm_poi_groups` key), `dimension`, `name`, `osm_id`, `cell_id_r16`.
-Sorted by `cell_id_r16`. Rendered with `GeoArrowScatterplotLayer` at high zoom.
+Sorted by `cell_id_r16`. Also written as `arrow/pois.arrow` (interleaved GeoArrow points) and
+rendered with `GeoArrowScatterplotLayer` at high zoom.
 
 ---
 
@@ -555,6 +572,7 @@ Built with Typer. Global options: `--catalog PATH` (repeatable), `--env FILE`,
 | `qm cors apply` | Apply the CORS rules to the public bucket | |
 | `qm doctor` | Check credentials, bucket access, CORS, DuckDB ≥ 1.5.6 with A5 v1 extension, and identical test-vector IDs across DuckDB, `pya5` and `a5-js` | |
 | `qm shell` | Interactive Python prompt (IPython) with `catalog`, `store`, `duck` (DuckDB connection with `spatial` + `a5` loaded) and `a5` preloaded | `--release <version>` |
+| `qm demo` | Publish a synthetic release in the production layout (all formats, ~9 communes) for viewer development and the JS tests; no network needed | `--bbox`, `--res`, `--no-switch` |
 
 Example session:
 
@@ -603,14 +621,15 @@ basemap's labels.
 | Order | Layer id | Class | Data | Zoom | Purpose |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `raster-<source>` | `ZarrLayer` (`@developmentseed/deck.gl-zarr`) | Raster GeoZarr, Section 6.4 | all | Optional context overlays: noise level, NO₂, PM2.5 as continuous rasters |
-| 2 | `communes` | `GeoArrowPolygonLayer` (`@geoarrow/deck.gl-layers`) | `communes.parquet` | < 8 | Commune choropleth of the personal score |
+| 2 | `communes` | `GeoArrowPolygonLayer` (`@geoarrow/deck.gl-geoarrow`) | `arrow/communes.arrow` | < 8 | Commune choropleth of the personal score |
 | 3 | `a5-parquet` | `A5ParquetLayer` (Qualimap) | `cells_r{11..16}.parquet`, Section 6.1 | ≥ 8 | **Main layer:** personal score from all nine `q_*` columns |
 | 4 | `a5-zarr` | `A5ZarrLayer` (Qualimap) | `qualimap.zarr`, Section 6.2 | ≥ 8 | Single-indicator view (one uint8 array per cell); alternative to layer 3 |
-| 5 | `pois` | `GeoArrowScatterplotLayer` | `pois.parquet`, Section 6.5 | ≥ 13 | Schools, doctors, stops behind the access scores |
+| 5 | `pois` | `GeoArrowScatterplotLayer` | `arrow/pois.arrow`, Section 6.5 | ≥ 13 | Schools, doctors, stops behind the access scores |
 | 6 | `selection` | `A5Layer` (`@deck.gl/geo-layers`) | Picked cells | all | Outline of hovered or selected cells |
 
 Layers 3 and 4 show the same cells; the UI toggles one or the other ("all dimensions,
-weighted" versus "one indicator").
+weighted" versus "one indicator"). `buildLayerStack()` in `packages/qm-layers/src/stack.js`
+builds this array for both viewers, so they always draw the same stack.
 
 **Why custom A5 layers.** `ZarrLayer` targets raster arrays: it reads the GeoZarr `spatial`,
 `multiscales` and `geo-proj` conventions to derive the level pyramid, affine transforms and
@@ -624,43 +643,56 @@ tiling, level selection, chunk streaming.
 Both A5 layers are deck.gl `TileLayer`s whose tiles are **A5 cells instead of web-mercator
 XYZ tiles**:
 
-- A custom `Tileset2D` subclass (passed through `TileLayer`'s `TilesetClass` prop; verify the
-  prop against the pinned deck.gl version) returns, for the current viewport, the A5 cells at
-  the **tile resolution** that cover it. Tile resolution = data resolution − 5 (one tile ≈ 1,024
-  data cells), with a floor of 11, so at res 16 a tile is a res-11 cell.
+- A custom `Tileset2D` subclass (`A5Tileset`, passed through `TileLayer`'s `TilesetClass`
+  prop, confirmed in deck.gl 9.4) returns, for the current viewport, the **tiles**: the
+  tile-resolution parents of the data cells covering the viewport (Section 6.1 explains why
+  not the tile cells covering it). Tile resolution = data resolution − 5 (one tile ≤ 1,024
+  data cells), so at res 16 a tile is a res-11 cell. A tile's bounding box (for culling) is
+  the extent of its descendants three levels down, padded by one such descendant.
 - Level selection follows the zoom table in 10.5; tiles are cached by `(release, res, tile_id)`.
 - Each tile's `getTileData` returns `{cellIds: BigUint64Array, values: …}` from the format
   reader (Parquet or Zarr).
 - **Rendering, two steps:**
-  1. **v0 (simplest):** `renderSubLayers` returns deck.gl's `A5Layer` for the tile with
+  1. **v0 (default, `renderMode: 'a5'`):** `renderSubLayers` returns deck.gl's `A5Layer` for the tile with
      `data = {length}`, `getPentagon: (_, {index}) => cellIds[index]` (`getPentagon` accepts a
      `bigint` or a hex string) and `getFillColor` reading a precomputed RGBA buffer.
      `A5Layer` is a composite layer whose `cell` sublayer is a `PolygonLayer`; it computes
      boundaries itself, and its documentation does not describe binary-attribute input.
-  2. **v1 (fast path):** compute boundaries once per tile in a Web Worker with
+     deck.gl 9.4's `A5Layer` depends on `a5-js` 0.10, whose cell IDs differ from `pya5` /
+     `a5-js` 1.0: the root `package.json` forces a single `a5-js` 1.0 with an npm `overrides`
+     entry (only `cellToBoundary` and `hexToU64` are used, unchanged in 1.0). Without it the
+     cells render at wrong locations.
+  2. **v1 (fast path, `renderMode: 'binary'`, implemented on the main thread):** compute boundaries once per tile with
      `cellToBoundary(cell, {closedRing: true, segments: 1})` (6 vertices per pentagon at
      these resolutions), pack them into flat `Float32Array` positions plus `startIndices`, and
      render a `SolidPolygonLayer` with binary attributes. Weight changes then only replace the
      colour attribute. Switch when the M3 benchmark shows `A5Layer` above budget at res 16.
 - Geometry is cached with the tile, so pans and weight changes never recompute it.
+- When the set of columns a tile needs changes (indicators, filter columns) or the Zarr
+  indicator changes, `reloadTiles()` marks all tiles for reload and runs the tileset update
+  immediately; cached content stays on screen until replaced.
 
 ### 10.3 `A5ParquetLayer`
 
-- Opens the footer of `cells_r{res}.parquet` once (hyparquet, range requests) and builds a map
-  `tile_id → row group` from the row-group `cell_id` statistics (Section 6.1 writes one row group per res-11
-  parent).
+- Opens the footer of `cells_r{res}.parquet` once (hyparquet with hyparquet-compressors for
+  ZSTD, range requests) and builds a map `tile → row group` from the row-group `cell_id`
+  statistics (Section 6.1 writes one row group per tile).
 - `getTileData` reads one row group, only the columns `cell_id`, the nine `q_*`, `pop` and
   `flags` (~20 bytes per cell before compression).
 - Colour = ramp(`Σ wᵢ·qᵢ / Σ wᵢ` over indicators with qᵢ ≠ 255). Weights are a layer prop;
   `updateTriggers: {getFillColor: weights}` recolours the cached tiles without refetching.
-  The colour buffer is computed in the worker for all loaded tiles at once.
+  The colour buffer is computed per tile on the main thread (a worker is the planned next
+  step if the M3 budget is missed).
+- `mask` / `maskKey` props: cells that fail the user's filters (Section 10.8) are drawn as no
+  data. Filters read `raw_*` columns, which the layer adds to `extraColumns` on demand.
 - Arrow alternative: `parquet-wasm` → Arrow table → typed columns. Use it if the hyparquet path
   is slower in the M3 benchmark; the layer API stays the same.
 
 ### 10.4 `A5ZarrLayer`
 
-- Opens `qualimap.zarr/r{res}/` with `zarrita`, reads `parent_index` once (one small array).
-- `getTileData` for a res-11 tile: look up `[first_row, row_count]` and fetch the slice of
+- Opens `qualimap.zarr/r{res}/` with `zarrita`, reads `tile_ids` and `tile_index` once (two
+  small arrays).
+- `getTileData` for a tile: look up `[first_row, row_count]` and fetch the slice of
   `cell_ids` and of the selected `q_<indicator>` array (one or two chunks each).
 - Colour = ramp(qᵢ / 25). No weighting; switching the indicator swaps the array and refetches.
 
@@ -670,7 +702,7 @@ MapLibre zoom at ~47° N:
 
 | Zoom | Resolution | Source |
 | --- | --- | --- |
-| < 8 | Communes | `communes.parquet` (whole file, GeoArrow polygons) |
+| < 8 | Communes | `arrow/communes.arrow` (whole file, GeoArrow polygons) |
 | 8–9.99 | 11 | tiles at res 11 (whole file is ~5,100 rows) |
 | 10–10.99 | 12 | tiles |
 | 11–11.99 | 13 | tiles |
@@ -680,26 +712,33 @@ MapLibre zoom at ~47° N:
 
 ### 10.6 GeoArrow and GeoParquet details
 
-- `@geoarrow/deck.gl-layers` passes Arrow buffers straight to deck.gl's binary attributes.
-  Load GeoParquet with `parquet-wasm` (`readGeoParquet`) into an Arrow table.
+- `@geoarrow/deck.gl-geoarrow` (the renamed `@geoarrow/deck.gl-layers`, 0.4) passes Arrow
+  buffers straight to deck.gl's binary attributes: the layers take an `arrow.RecordBatch`
+  and per-row colours as `arrow.Data<FixedSizeList<Uint8>[4]>`. Its ES modules use
+  extensionless imports, so it needs a bundler or esm.sh (not plain Node).
 - **Geometry encoding.** GeoParquet 1.1 native GeoArrow encoding allows only the "separated"
-  coordinate layout, which gives useful column statistics; deck.gl expects "interleaved".
-  WKB (GeoParquet 1.0) must be decoded. Either way, plan for a conversion in the browser. It
-  is cheap for communes (2,110 polygons) and POIs. A5 cells avoid it entirely: their
-  geometry is derived from `cell_id`.
+  coordinate layout; deck.gl expects "interleaved", and WKB must be decoded. The pipeline
+  therefore writes the two vector tables a second time as Arrow IPC with interleaved
+  GeoArrow (`arrow/communes.arrow`, `arrow/pois.arrow`): no decoding in the browser and no
+  `parquet-wasm`. The GeoParquet files stay the analysis format. A5 cells need neither:
+  their geometry is derived from `cell_id`.
 - **CRS.** `ZarrLayer` reprojects rasters itself; vector layers do not. Every GeoParquet the
   pipeline publishes is written in CRS84 (lon/lat).
-- **Size.** `communes.parquet` and `pois.parquet` are loaded whole (a few MB). Cell tables are
+- **Size.** `communes.arrow` and `pois.arrow` are loaded whole (a few MB). Cell tables are
   never loaded whole beyond res 11; they stream per tile.
 
 ### 10.7 Phase 0: single HTML page (`viewer/index.html`)
 
-- No build step: ES modules from esm.sh or jsDelivr with pinned versions: `deck.gl`,
-  `@deck.gl/mapbox`, `@deck.gl/geo-layers`, `@geoarrow/deck.gl-layers`, `apache-arrow`,
-  `parquet-wasm`, `hyparquet`, `zarrita`, `a5-js`, `maplibre-gl`,
-  `@developmentseed/deck.gl-zarr`.
-- The A5 layers live in `viewer/layers/*.js` as plain ES modules, so Phase 1 imports the same
-  code.
+- No build step: ES modules from esm.sh with pinned versions through an import map:
+  `@deck.gl/*`, `@geoarrow/deck.gl-geoarrow`, `apache-arrow`, `hyparquet`,
+  `hyparquet-compressors`, `zarrita`, `a5-js`, `proj4`, `maplibre-gl`,
+  `@developmentseed/deck.gl-zarr`. `a5-js` is marked external for `@deck.gl/geo-layers` so the
+  page uses a single a5-js 1.0 (see 10.2).
+- The layers, readers and helpers live in the workspace package `packages/qm-layers` (plain
+  ES modules with JSDoc), imported by both phases. `npm run viewer` serves the page with Vite
+  and local `node_modules` against a local release (`QM_VIEWER_DATA`, default `.qm/pub`).
+- URL parameters: `?data=` (public bucket), `?release=`, `?style=`, `?interleaved=0`,
+  `?debug`.
 - UI: nine weight sliders, an indicator picker (switches to `A5ZarrLayer`), raster overlay
   toggles, a legend, and a hover tooltip with the per-indicator breakdown. State lives in the
   URL fragment (`#w=…&z=…&ll=…&ind=…`).
@@ -708,17 +747,33 @@ MapLibre zoom at ~47° N:
 
 ### 10.8 Phase 1: Next.js application (`apps/web`)
 
-- Next.js App Router with **static export** (no server runtime).
-- `@deck.gl/react` `DeckGL` with `react-map-gl/maplibre` as the basemap (interleaved).
-- Layers come from the workspace package `packages/qm-layers` (TypeScript port of the
-  Phase 0 modules): `A5TileLayer`, `A5ParquetLayer`, `A5ZarrLayer`, a5 tileset, readers,
-  colour ramps, worker.
-- `packages/qm-data`: release discovery, caching (in-memory LRU plus Cache API for immutable
-  release files).
-- DuckDB-WASM in a worker for the analysis panel: commune rankings for the user's weights,
-  histograms, "top x% for your weights", filters (for example "PT class B or better and noise
-  < 55 dB"). Filter results feed the `A5ParquetLayer` as a cell mask.
-- i18n de, fr, it, en from `catalog.json`; keyboard-accessible sliders; colour-blind-safe ramps.
+- Next.js 16 App Router with **static export** (`output: 'export'`, no server runtime); the
+  map renders client-side only. Build-time settings: `QM_DATA`, `QM_BASE_PATH`,
+  `QM_MAP_STYLE`, `QM_DUCKDB_EXTENSIONS`; per-visit overrides `?data=`, `?release=`,
+  `?style=`, `?engine=cpu`, `?binary`.
+- `react-map-gl/maplibre` basemap with deck.gl **interleaved** through `MapboxOverlay` and
+  `useControl` (the deck.gl-recommended pattern for interleaving with react-map-gl;
+  `@deck.gl/react`'s `DeckGL` component draws on its own canvas and cannot interleave).
+- Layers, readers, release discovery, filters, analysis queries and UI strings come from
+  `packages/qm-layers`, written in JavaScript with JSDoc rather than TypeScript, so the
+  no-build phase-0 page and the app run the same files. Release files are immutable and
+  versioned by path, so the browser HTTP cache does the caching; a separate `qm-data`
+  package and Cache API layer were not needed.
+- Analysis panel (opens on demand): commune rankings for the user's weights (click to zoom),
+  population histogram of the personal score, "top 10 % for your weights" threshold, and the
+  population living in cells that match the filters. It runs on **DuckDB-WASM** in a worker,
+  reading `communes.parquet` and the cell file at the finest resolution ≤ 13 over HTTP range
+  requests. The DuckDB-WASM bundles (~36–41 MB wasm) are self-hosted from the static export
+  and loaded only when the panel opens. DuckDB-WASM autoloads its Parquet extension from
+  `extensions.duckdb.org` unless `QM_DUCKDB_EXTENSIONS` names a self-hosted mirror. If
+  DuckDB-WASM cannot start, a plain-JS engine computes the same results from the same files
+  (`packages/qm-layers/src/analysis.js` holds both the SQL and the JS versions; tests and a
+  DuckDB cross-check confirm they agree).
+- Filters are thresholds on raw indicator values in their own units (for example "noise ≤
+  55 dB(A)" and "public transport ≥ 0.5"); the same definition masks cells in
+  `A5ParquetLayer` and filters rows in SQL.
+- i18n de, fr, it, en (UI strings in `qm-layers`, labels from `catalog.json`); native,
+  keyboard-accessible range sliders; viridis ramp.
 - Performance budget: first meaningful map < 2.5 s on 4G; slider-to-repaint < 50 ms for
   60,000 visible cells. If the worker recolour path misses the budget, move the weighting into
   a deck.gl `LayerExtension` (weights as uniforms, the nine scores as instanced attributes).
@@ -732,40 +787,48 @@ qualimap/
   catalog/
     indicators.yaml                 # sources, indicators, dimensions
     schema/indicators.schema.json
-    maps/                           # lookup tables used by transforms
+    maps/                           # lookup tables used by transforms (e.g. NOLC04 classes)
     local/                          # optional overlay catalogs (git-ignored or per deployment)
   docs/
     SPEC.md                         # this document
-    methodology/                    # per-indicator methodology notes
-  pipeline/                         # Python package `qualimap`
+  pipeline/                         # Python package `qualimap` (pip install -e "pipeline[dev]")
     pyproject.toml
     src/qualimap/
       cli.py                        # Typer app (qm)
-      catalog.py                    # load, layer, validate, DAG
-      store.py                      # S3/B2 access, key layout
-      state.py                      # fetch records, run records
-      grid.py                       # A5 universe, joins, roll-up
-      fetchers/                     # stac, http, estv_api, osm_pbf, gtfs
-      transforms/                   # one module per dimension
-      export/                       # geoparquet.py, geozarr.py
-      qa.py
-    tests/
-  viewer/
-    index.html                      # phase 0 (no build)
-    layers/                         # A5TileLayer, A5ParquetLayer, A5ZarrLayer (ES modules)
-  apps/web/                         # phase 1 (Next.js + @deck.gl/react)
-  packages/qm-layers/               # TS deck.gl layers, a5 tileset, readers, worker
-  packages/qm-data/                 # release discovery, caching
+      settings.py, store.py         # environment, fsspec stores (local or S3/B2)
+      catalog.py                    # load, layer, interpolate ${ENV}, validate, DAG
+      state.py, pipeline.py         # fetch/run records; run --due orchestration, exit codes
+      fetchers/                     # http, stac, estv_api, osm_pbf, gtfs, none (+ entry points)
+      staging.py                    # raw → staged Parquet / COG
+      grid.py, population.py        # A5 coverings, universe, joins, neighbourhoods, roll-up
+      transforms/                   # noise, air, public_transport, taxation, poi_access, green, solar
+      normalize.py, compute.py, qa.py
+      export/                       # tables, geoparquet, geozarr, release_builder
+      releases.py, maintenance.py   # publish/rollback/diff; gc, cors, doctor
+      duck.py                       # DuckDB connection with spatial + a5
+      demo.py                       # synthetic release (qm demo)
+    tests/                          # end-to-end run on synthetic upstreams (respx) + unit tests
+  packages/qm-layers/               # deck.gl layers, A5 tileset, readers, stack, filters,
+                                    # analysis SQL/JS, i18n (plain ES modules, node --test)
+  viewer/                           # phase 0: index.html (esm.sh import map), app.js, Vite dev config
+  apps/web/                         # phase 1: Next.js static export + DuckDB-WASM panel
   .github/workflows/
-    ci.yml                          # lint, tests, catalog validation
+    ci.yml                          # ruff, catalog validate, pytest, qm demo, JS tests, web build
     pipeline.yml                    # scheduled qm run --due
   docker/pipeline.Dockerfile
+  .env.example
 ```
 
-Python 3.12; key dependencies: `pya5` ≥ 1.0, `duckdb` ≥ 1.5.6 (with `spatial` and the A5 v1 `a5` extension),
-`pyarrow`, `geopandas`, `shapely` 2, `pyproj`, `rasterio`, `exactextract`, `zarr` 3,
-`xarray`, `xdggs`, `obstore`, `httpx`, `pystac-client`, `typer`, `rich`, `ipython`,
-`pydantic` (catalog models), `jsonschema`.
+Python 3.12; key dependencies: `pya5` ≥ 1.0, `duckdb` ≥ 1.5.6 (with `spatial` and the A5 v1
+`a5` extension), `pyarrow`, `geopandas`, `shapely` 2, `pyproj`, `rasterio`, `scipy`, `zarr` 3,
+`fsspec` + `s3fs` (B2 through the S3 API; CORS calls through `botocore`), `httpx`, `typer`,
+`rich`, `pyyaml`, `jsonschema`. Extras: `osm` (`osmium`), `zonal` (`exactextract`), `shell`
+(`ipython`), `analysis` (`xarray`, `xdggs`), `dev` (`pytest`, `respx`, `ruff`).
+
+JavaScript: deck.gl 9.4, `a5-js` 1.0 (forced for deck.gl via npm `overrides`), `hyparquet` +
+`hyparquet-compressors`, `zarrita`, `apache-arrow`, `@geoarrow/deck.gl-geoarrow`,
+`@developmentseed/deck.gl-zarr`, `proj4`, MapLibre GL 5; web app: Next.js 16, React 19,
+`react-map-gl` 8, `@duckdb/duckdb-wasm`.
 
 ---
 
@@ -795,11 +858,34 @@ Python 3.12; key dependencies: `pya5` ≥ 1.0, `duckdb` ≥ 1.5.6 (with `spatial
 5. Hosting for heavy jobs (OSM walking-network routing over all of Switzerland): GitHub
    runners versus a small dedicated VM.
 6. Domain and CDN choice for the public bucket.
-7. deck.gl `TileLayer` with a custom A5 `Tileset2D` (via `TilesetClass`): confirm the API in
-   the pinned deck.gl version; fallback is an XYZ `TileLayer` whose tiles look up the covering
-   res-11 cells.
-8. Whether `@geoarrow/deck.gl-layers` gains a native A5 layer (Lonboard already exposes an
-   `A5Layer` from Arrow data); if so, `A5ParquetLayer` could render Arrow tiles directly.
+7. ~~deck.gl `TileLayer` with a custom A5 `Tileset2D`~~ Resolved: `TilesetClass` works in
+   deck.gl 9.4 (Section 10.2).
+8. `@geoarrow/deck.gl-geoarrow` 0.4 now ships a `GeoArrowA5Layer` (wrapping deck.gl's
+   `A5Layer` for Arrow cell-ID columns). `A5ParquetLayer` could render Arrow tiles through it
+   instead of typed arrays; worth benchmarking against the binary `SolidPolygonLayer` path.
+9. Upstream: deck.gl's `A5Layer` should move to `a5-js` 1.x (today it pins 0.10, whose IDs
+   differ); until then Qualimap forces 1.0 with an npm override.
+
+---
+
+## 14. Implementation status (v0)
+
+Everything in Sections 3–10 is implemented in this repository, with these notes:
+
+- **Verified here:** the full pipeline on synthetic upstreams (pytest: fetch → stage → cells →
+  compute → QA → export → publish, nothing-to-do reruns, forced rebuilds, diff, rollback);
+  `qm demo` releases read by the JS readers (node tests); the phase-0 page and the web app
+  in headless Chrome (all zoom bands, single-indicator Zarr view, binary path, hover, POIs,
+  filters, language switch, rankings with fly-to); the analysis SQL against native DuckDB
+  versus the JS engine.
+- **Not yet run against real services:** real upstream downloads (endpoints and year-specific
+  URLs are configured through `${QM_*}` variables), Backblaze B2 (the code path is the same
+  fsspec/S3 one, tested against local stores), the DuckDB `a5` extension (the pipeline uses
+  `pya5` and treats the extension as an optional accelerator), the swisstopo base map, and
+  DuckDB-WASM's Parquet extension download (the panel falls back to the JS engine when it is
+  unavailable).
+- **Simplifications to revisit:** colour computation runs on the main thread (no worker yet);
+  the binary polygon path is opt-in; the res-11 universe for quintile breaks is read whole.
 
 ---
 

@@ -7,7 +7,6 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -63,12 +62,16 @@ def unresolved(value: Any) -> list[str]:
 
 
 def schema() -> dict:
-    root = Path(__file__).resolve()
-    for parent in root.parents:
-        p = parent / "catalog" / "schema" / "indicators.schema.json"
-        if p.exists():
-            return json.loads(p.read_text())
-    return json.loads(resources.files("qualimap").joinpath("data/indicators.schema.json").read_text())
+    """The catalog JSON Schema from the repository's catalog/schema/ (source checkout, or an
+    install run from a directory that holds catalog/, as in the Docker image)."""
+    starts = [Path(__file__).resolve(), Path.cwd().resolve() / "_"]
+    for start in starts:
+        for parent in start.parents:
+            p = parent / "catalog" / "schema" / "indicators.schema.json"
+            if p.exists():
+                return json.loads(p.read_text())
+    raise FileNotFoundError(
+        "catalog/schema/indicators.schema.json not found above the package or the working directory")
 
 
 @dataclass

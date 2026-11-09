@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -15,8 +16,9 @@ import { breakdown, personalScores, quantileBreaks } from '../src/score.js';
 import { decodeWeights, encodeWeights, parseHash, writeHash } from '../src/url-state.js';
 import { levelForZoom, resolutionForZoom, tileResolution } from '../src/zoom.js';
 
-// A demo release built by `qm demo` (QM_TEST_RELEASE overrides the location).
-const PUB = process.env.QM_TEST_PUB ?? '/tmp/qm-pub';
+// A demo release built by `qm demo` (default output .qm/pub; QM_TEST_PUB overrides). Tests that
+// need it are skipped when it is missing.
+const PUB = process.env.QM_TEST_PUB ?? fileURLToPath(new URL('../../../.qm/pub', import.meta.url));
 const RELEASE = existsSync(join(PUB, 'releases'))
   ? join(PUB, 'releases', readdirSync(join(PUB, 'releases')).filter((d) => /^\d{4}\.\d{2}\.\d+$/.test(d)).sort().at(-1) ?? '')
   : null;
