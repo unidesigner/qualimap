@@ -26,7 +26,7 @@ export class A5ZarrLayer extends A5TileLayer {
   updateState(params) {
     super.updateState(params);
     if (params.changeFlags.propsChanged && params.oldProps.indicator !== params.props.indicator) {
-      this.state.tileset?.reloadAll();
+      this.reloadTiles();
     }
   }
 

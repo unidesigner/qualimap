@@ -89,3 +89,4 @@ export function poisLayer({ id = 'pois', table, visible = true, radiusMinPixels 
     _validate: false,
   });
 }
+

@@ -81,6 +81,17 @@ export class A5TileLayer extends TileLayer {
     };
   }
 
+  /**
+   * Refetch every tile (cached content stays on screen until replaced). TileLayer only
+   * re-requests tiles during its own tileset update, so run one right after marking them.
+   */
+  reloadTiles() {
+    const { tileset } = this.state;
+    if (!tileset) return;
+    tileset.reloadAll();
+    this._updateTileset();
+  }
+
   getTileData(tile) {
     return this.loadTile(tile.index, tile.signal);
   }

@@ -37,7 +37,7 @@ export class A5ParquetLayer extends A5TileLayer {
     if (!changeFlags.propsChanged) return;
     const cols = (p) => `${p.indicators?.join(',')}|${p.extraColumns?.join(',')}`;
     // Tiles hold only the columns requested at load time; refetch when the set changes.
-    if (cols(props) !== cols(oldProps)) this.state.tileset?.reloadAll();
+    if (cols(props) !== cols(oldProps)) this.reloadTiles();
   }
 
   reader(res) {
@@ -64,7 +64,9 @@ export class A5ParquetLayer extends A5TileLayer {
     const q = indicators.map((i) => content.columns[`q_${i}`]).filter(Boolean);
     const w = indicators.map((_, j) => weights[j] ?? 0);
     content.scores = personalScores(q, w, content.scores);
-    if (mask) {
+    // A tile still being refetched may lack the filter columns: leave it unmasked until then.
+    const hasMaskColumns = this.props.extraColumns.every((c) => !c.startsWith('raw_') || c in content.columns);
+    if (mask && hasMaskColumns) {
       for (let i = 0; i < content.length; i++) if (!mask(content, i)) content.scores[i] = NaN;
     }
     return colorize(content.scores, { ramp, breaks, out: content._colors });

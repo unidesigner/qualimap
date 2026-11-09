@@ -161,3 +161,24 @@ test('i18n fallbacks and language choice', async () => {
   assert.equal(pickLanguage(['it-CH', 'de']), 'it');
   assert.equal(pickLanguage(['ja']), 'en');
 });
+
+test('analysis: CPU rankings and distribution; SQL builders validate ids', async () => {
+  const A = await import('../src/analysis.js');
+  const communes = {
+    commune_bfs: Uint16Array.of(1, 2, 3), name: ['A', 'B', 'C'], canton: [1, 1, 2], pop: Float64Array.of(10, 20, 30),
+    q_a: Uint8Array.of(250, 125, 255), q_b: Uint8Array.of(0, 125, 255),
+  };
+  const r = A.rankingsCpu(communes, ['a', 'b'], [1, 0], 5);
+  assert.deepEqual(r.map((x) => x.name), ['A', 'B']);
+  assert.equal(r[0].score, 10);
+  const cells = { pop: Float32Array.of(1, 1, 2, 4), q_a: Uint8Array.of(25, 125, 200, 255), raw_a: Float32Array.of(1, 5, 8, NaN) };
+  const d = A.distributionCpu(cells, ['a'], [1], [{ indicator: 'a', op: 'gte', value: 5 }], 0.5);
+  assert.deepEqual(d.bins, [0, 1, 0, 0, 0, 1, 0, 0, 2, 0]);
+  assert.deepEqual(d.matched, [0, 0, 0, 0, 0, 1, 0, 0, 2, 0]);
+  assert.equal(d.total, 8);
+  assert.equal(d.matchedTotal, 3);
+  assert.equal(d.topThreshold, 8);
+  assert.throws(() => A.scoreSql(['a; drop'], [1]));
+  assert.match(A.rankingsSql("'c.parquet'", ['a', 'b'], [1, 0]), /q_a <> 255 THEN 1 \* q_a/);
+  assert.doesNotMatch(A.rankingsSql("'c.parquet'", ['a', 'b'], [1, 0]), /q_b/);
+});
