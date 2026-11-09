@@ -1,0 +1,30 @@
+{
+  "name": "@qualimap/qm-layers",
+  "version": "0.1.0",
+  "description": "deck.gl layers for Qualimap: A5 tiles from GeoParquet and GeoZarr, raster GeoZarr, GeoArrow communes and POIs",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@deck.gl/core": "^9.4.1",
+    "@deck.gl/geo-layers": "^9.4.1",
+    "@deck.gl/layers": "^9.4.1",
+    "@developmentseed/deck.gl-zarr": "^0.9.0",
+    "@geoarrow/deck.gl-geoarrow": "^0.4.2",
+    "@math.gl/polygon": "^4.1.0",
+    "a5-js": "^1.0.0",
+    "apache-arrow": "^21.0.0",
+    "hyparquet": "^1.33.0",
+    "hyparquet-compressors": "^1.1.1",
+    "proj4": "^2.19.0",
+    "zarrita": "^0.7.5"
+  }
+}

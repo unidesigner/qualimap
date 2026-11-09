@@ -12,3 +12,5 @@ node_modules/
 .next/
 out/
 .DS_Store
+apps/web/public/duckdb/
+.qm/

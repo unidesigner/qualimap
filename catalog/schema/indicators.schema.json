@@ -60,6 +60,15 @@
             },
             "boundary_source": {
               "$ref": "#/$defs/id"
+            },
+            "boundary_file": {
+              "type": "string"
+            },
+            "commune_file": {
+              "type": "string"
+            },
+            "water_source": {
+              "$ref": "#/$defs/id"
             }
           }
         },
@@ -361,6 +370,72 @@
             "raster_zarr": {
               "type": "boolean",
               "description": "Republish this raster as GeoZarr for the viewer's ZarrLayer"
+            }
+          }
+        },
+        "stage": {
+          "type": "object",
+          "description": "How raw files become staged files (SPEC §2)",
+          "properties": {
+            "layers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "layer": {
+                    "type": "string"
+                  },
+                  "where": {
+                    "type": "string"
+                  },
+                  "columns": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "dissolve": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "columns": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "target column: source column"
+            },
+            "where": {
+              "type": "string"
+            },
+            "select": {
+              "type": "string"
+            },
+            "sep": {
+              "type": "string"
+            },
+            "encoding": {
+              "type": "string"
+            },
+            "xpath": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "all": {
+              "type": "boolean"
             }
           }
         }
