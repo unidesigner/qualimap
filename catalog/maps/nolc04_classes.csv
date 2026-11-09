@@ -1,0 +1,11 @@
+# NOLC04 land-cover main domains -> Qualimap classes (methodology §3.6).
+# Rows keyed by main_domain apply to every basic category whose code // 10 equals it.
+# Add rows with a `code` column (and drop main_domain) to map individual basic categories;
+# verify domain numbering against the BFS NOLC04 code list before the first production run.
+main_domain,class,description
+1,sealed,"Anthropogenic surfaces (buildings, sealed and paved surfaces, greenhouses)"
+2,green_herb,"Grass and herbaceous vegetation"
+3,green_shrub,"Shrub vegetation"
+4,tree,"Tree vegetation (closed and open forest, groups of trees, single trees and orchards)"
+5,excluded,"Surfaces without vegetation (bare land, rock, scree)"
+6,excluded,"Water bodies, wetlands, glaciers and firn"
