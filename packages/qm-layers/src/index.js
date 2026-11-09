@@ -14,4 +14,7 @@ export { ZarrCells } from './readers/zarr.js';
 export { defaultWeights, label, loadRelease, scoredIndicators } from './release.js';
 export { breakdown, NODATA, personalScores, quantileBreaks, SCALE } from './score.js';
 export { DEFAULT_ZOOM_TABLE, levelForZoom, resolutionForZoom, tileResolution } from './zoom.js';
+export { activeFilters, cellMask, filterColumns, filterKey, filterSql, passes } from './filters.js';
+export { LANGUAGES, pickLanguage, STRINGS, t } from './i18n.js';
+export { buildLayerStack, RASTER_DOMAINS } from './stack.js';
 export { decodeWeights, encodeWeights, parseHash, writeHash } from './url-state.js';

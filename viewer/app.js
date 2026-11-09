@@ -7,7 +7,6 @@
  * globalThis.__qm). View state lives in the fragment (#w=…&z=…&ll=…&ind=…&m=single).
  */
 import { MapboxOverlay } from '@deck.gl/mapbox';
-import { A5Layer } from '@deck.gl/geo-layers';
 import maplibregl from 'maplibre-gl';
 
 import * as qm from '@qualimap/qm-layers';
@@ -16,25 +15,6 @@ const params = new URLSearchParams(location.search);
 const DATA = params.get('data') ?? globalThis.QUALIMAP_DATA ?? new URL('./', location.href).href;
 const STYLE = params.get('style') ?? 'https://vectortiles.geo.admin.ch/styles/ch.swisstopo.lightbasemap.vt/style.json';
 const BLANK_STYLE = { version: 8, sources: {}, layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#eef1f5' } }] };
-const RASTER_DOMAINS = {
-  foen_sonbase_road_day: [30, 80], foen_sonbase_road_night: [25, 70],
-  foen_no2: [0, 45], foen_pm10: [0, 30], foen_pm25: [0, 20],
-};
-const I18N = {
-  en: { weighted: 'All dimensions, weighted', single: 'One indicator', weights: 'Your weights', reset: 'Reset weights',
-        overlays: 'Overlays', pois: 'Points of interest', classed: 'Quintile classes', fast: 'Fast polygon path',
-        hover: 'Hover a cell for details.', score: 'Your score', release: 'Release', nodata: 'no data' },
-  de: { weighted: 'Alle Dimensionen, gewichtet', single: 'Ein Indikator', weights: 'Ihre Gewichtung', reset: 'Zurücksetzen',
-        overlays: 'Überlagerungen', pois: 'Points of Interest', classed: 'Quintilklassen', fast: 'Schneller Polygonpfad',
-        hover: 'Zelle überfahren für Details.', score: 'Ihre Bewertung', release: 'Release', nodata: 'keine Daten' },
-  fr: { weighted: 'Toutes les dimensions, pondérées', single: 'Un indicateur', weights: 'Vos pondérations', reset: 'Réinitialiser',
-        overlays: 'Superpositions', pois: "Points d'intérêt", classed: 'Classes par quintiles', fast: 'Rendu rapide',
-        hover: 'Survolez une cellule pour les détails.', score: 'Votre score', release: 'Version', nodata: 'pas de données' },
-  it: { weighted: 'Tutte le dimensioni, ponderate', single: 'Un indicatore', weights: 'I vostri pesi', reset: 'Reimposta',
-        overlays: 'Sovrapposizioni', pois: "Punti d'interesse", classed: 'Classi per quintili', fast: 'Rendering veloce',
-        hover: 'Passa su una cella per i dettagli.', score: 'Il vostro punteggio', release: 'Versione', nodata: 'nessun dato' },
-};
-
 const $ = (s) => document.querySelector(s);
 const state = {
   release: null, catalog: null, indicators: [], weights: [], mode: 'weighted', indicator: null,
@@ -46,7 +26,7 @@ let overlay;
 let breaksTimer;
 
 function t(key) {
-  return (I18N[state.lang] ?? I18N.en)[key] ?? I18N.en[key] ?? key;
+  return qm.t(state.lang, key);
 }
 
 function applyI18n() {
@@ -170,41 +150,16 @@ function showDetails(info) {
 
 function render() {
   if (!overlay) return;
-  const cat = state.catalog;
-  const zoom = map.getZoom();
-  const level = qm.levelForZoom(zoom, cat.zoom_table);
-  const ids = state.indicators.map((i) => i.id);
-  const resolutionForZoom = (z) => qm.resolutionForZoom(z, cat.zoom_table);
-  const common = {
-    regionBounds: cat.bounds, resolutionForZoom, renderMode: state.binary ? 'binary' : 'a5',
-    onHover: (info) => { state.hover = info.object ?? null; showDetails(info); renderSelection(); },
-  };
-  const layers = [];
-  for (const [sid, r] of Object.entries(state.rasters)) {
-    if (r.on && r.node) layers.push(qm.rasterLayer({ id: `raster-${sid}`, node: r.node, domain: RASTER_DOMAINS[sid] ?? [0, 100] }));
-  }
-  if (state.communes) {
-    layers.push(qm.communesLayer({
-      id: 'communes', table: state.communes, indicators: ids, weights: state.weights,
-      breaks: state.breaks, visible: 'geography' in level,
-    }));
-  }
-  if (state.mode === 'weighted') {
-    layers.push(new qm.A5ParquetLayer({
-      id: 'a5-parquet', ...common, indicators: ids, weights: state.weights, breaks: state.breaks,
-      getUrl: (res) => state.release.url(cat.files.cells[String(res)]),
-    }));
-  } else {
-    layers.push(new qm.A5ZarrLayer({ id: 'a5-zarr', ...common, url: state.release.url(cat.files.zarr), indicator: state.indicator }));
-  }
-  if (state.pois && $('#pois').checked) layers.push(qm.poisLayer({ table: state.pois, visible: zoom >= 13 }));
-  if (state.hover?.cell_id !== undefined) {
-    layers.push(new A5Layer({
-      id: 'selection', data: [state.hover], getPentagon: (d) => d.cell_id, filled: false, stroked: true,
-      getLineColor: [255, 255, 255, 255], lineWidthMinPixels: 2,
-    }));
-  }
-  overlay.setProps({ layers });
+  const rasters = Object.entries(state.rasters).filter(([, r]) => r.on && r.node).map(([id, r]) => ({ id, node: r.node }));
+  overlay.setProps({
+    layers: qm.buildLayerStack({
+      release: state.release, zoom: map.getZoom(), indicators: state.indicators.map((i) => i.id),
+      weights: state.weights, mode: state.mode, indicator: state.indicator, breaks: state.breaks,
+      renderMode: state.binary ? 'binary' : 'a5', communes: state.communes, pois: state.pois,
+      showPois: $('#pois').checked, rasters, selected: state.hover?.cell_id !== undefined ? state.hover : null,
+      onHover: (info) => { state.hover = info.object ?? null; showDetails(info); renderSelection(); },
+    }),
+  });
 }
 
 function renderSelection() {
@@ -220,7 +175,7 @@ async function main() {
   state.weights = h.weights ? qm.decodeWeights(h.weights, state.indicators.length) : state.indicators.map((i) => defaults[i.id]);
   state.indicator = h.indicator ?? state.indicators[0]?.id;
   state.mode = h.mode === 'single' ? 'single' : 'weighted';
-  state.lang = navigator.language?.slice(0, 2) in I18N ? navigator.language.slice(0, 2) : 'en';
+  state.lang = qm.pickLanguage(navigator.languages ?? [navigator.language], cat.languages ?? qm.LANGUAGES);
   $('#lang').value = state.lang;
   $('#release').textContent = `${t('release')} ${state.release.version}`;
   $('#legend .bar').style.background = qm.rampCss();

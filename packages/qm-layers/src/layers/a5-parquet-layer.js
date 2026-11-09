@@ -31,6 +31,15 @@ export class A5ParquetLayer extends A5TileLayer {
     this.setState({ readers: new Map() });
   }
 
+  updateState(params) {
+    super.updateState(params);
+    const { props, oldProps, changeFlags } = params;
+    if (!changeFlags.propsChanged) return;
+    const cols = (p) => `${p.indicators?.join(',')}|${p.extraColumns?.join(',')}`;
+    // Tiles hold only the columns requested at load time; refetch when the set changes.
+    if (cols(props) !== cols(oldProps)) this.state.tileset?.reloadAll();
+  }
+
   reader(res) {
     const readers = this.state.readers;
     if (!readers.has(res)) readers.set(res, ParquetCells.open(this.props.getUrl(res)));

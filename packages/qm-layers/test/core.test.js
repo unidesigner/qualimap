@@ -133,3 +133,31 @@ releaseTest('ZarrCells tile index matches the Parquet tiles', async () => {
   assert.deepEqual(Array.from(a.cellIds), Array.from(b.cellIds));
   assert.deepEqual(Array.from(a.columns.q_noise), Array.from(b.columns.q_noise));
 });
+
+test('filters: mask, columns, key and SQL agree', async () => {
+  const { cellMask, filterColumns, filterKey, filterSql, activeFilters } = await import('../src/filters.js');
+  const filters = [
+    { indicator: 'noise', op: 'lte', value: 55 },
+    { indicator: 'public_transport', op: 'gte', value: 0.5 },
+    { indicator: 'bad id; drop', op: 'lte', value: 1 },
+    { indicator: 'air', op: 'lte', value: Number.NaN },
+  ];
+  assert.equal(activeFilters(filters).length, 2);
+  assert.deepEqual(filterColumns(filters), ['raw_noise', 'raw_public_transport']);
+  assert.equal(filterKey(filters), 'noise<=55&public_transport>=0.5');
+  const content = { columns: { raw_noise: Float32Array.of(50, 60, 50, NaN), raw_public_transport: Float32Array.of(1, 1, 0.1, 1) } };
+  const mask = cellMask(filters);
+  assert.deepEqual([0, 1, 2, 3].map((i) => mask(content, i)), [true, false, false, false]);
+  assert.equal(cellMask([]), null);
+  assert.match(filterSql(filters), /raw_noise <= 55\) AND .*raw_public_transport >= 0.5\)$/);
+  assert.equal(filterSql([]), 'TRUE');
+});
+
+test('i18n fallbacks and language choice', async () => {
+  const { t, pickLanguage } = await import('../src/i18n.js');
+  assert.equal(t('de', 'reset'), 'Zurücksetzen');
+  assert.equal(t('xx', 'reset'), 'Reset weights');
+  assert.equal(t('fr', 'topShare', { p: 10 }), 'Top 10 % selon vos pondérations');
+  assert.equal(pickLanguage(['it-CH', 'de']), 'it');
+  assert.equal(pickLanguage(['ja']), 'en');
+});
