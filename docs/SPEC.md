@@ -548,7 +548,7 @@ Built with Typer. Global options: `--catalog PATH` (repeatable), `--env FILE`,
 | `qm releases list` | Published releases with size and source versions | |
 | `qm releases rollback <version>` | Point `latest.json` at an earlier release | |
 | `qm releases diff <a> <b>` | Per-indicator change statistics between two releases | `--commune <bfs>` |
-| `qm qa run` | Run QA checks without publishing | `--indicator` |
+| `qm qa run` | Run QA checks without publishing | `--indicator`, `--compare-neighbourhoods` |
 | `qm inspect cell <cell_id\|lon,lat>` | All indicator values and lineage for one cell | `--res` |
 | `qm inspect commune <bfs\|name>` | Commune values and ranks | |
 | `qm gc` | Apply retention rules to `raw/`, `staged/`, `cells/`, `indicators/` | `--keep-raw 3`, `--dry-run` |
