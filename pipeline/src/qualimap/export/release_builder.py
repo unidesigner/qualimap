@@ -70,11 +70,15 @@ def build_release(catalog: Catalog, store: Store, state: StateStore, out_dir: Pa
         communes = _communes(catalog, store, state, base, present)
         if communes is not None:
             geoparquet.write_polygons(communes, out_dir / "parquet" / "communes.parquet")
+            geoparquet.write_geoarrow_polygons(communes, out_dir / "arrow" / "communes.arrow")
             files_info["parquet/communes.parquet"] = {"rows": len(communes)}
+            files_info["arrow/communes.arrow"] = {"rows": len(communes)}
         pois = _pois(catalog, store, state, base_res)
         if pois is not None:
             geoparquet.write_points(pois, out_dir / "parquet" / "pois.parquet")
+            geoparquet.write_geoarrow_points(pois, out_dir / "arrow" / "pois.arrow")
             files_info["parquet/pois.parquet"] = {"rows": len(pois)}
+            files_info["arrow/pois.arrow"] = {"rows": len(pois)}
     if "zarr" in formats:
         files_info["zarr/qualimap.zarr"] = geozarr.write_dggs(finals, out_dir / "zarr" / "qualimap.zarr",
                                                               present, release_meta)
@@ -92,10 +96,13 @@ def build_release(catalog: Catalog, store: Store, state: StateStore, out_dir: Pa
         "flags": FLAGS,
         "zoom_table": [z for z in ZOOM_TABLE if z.get("resolution", 0) in resolutions or "geography" in z],
         "resolutions": resolutions,
+        "tile_resolutions": {str(r): max(r - 5, 0) for r in resolutions},
         "files": {
             "cells": {str(r): f"parquet/cells_r{r}.parquet" for r in resolutions} if "parquet" in formats else {},
             "communes": "parquet/communes.parquet" if "parquet/communes.parquet" in files_info else None,
             "pois": "parquet/pois.parquet" if "parquet/pois.parquet" in files_info else None,
+            "communes_arrow": "arrow/communes.arrow" if "arrow/communes.arrow" in files_info else None,
+            "pois_arrow": "arrow/pois.arrow" if "arrow/pois.arrow" in files_info else None,
             "zarr": "zarr/qualimap.zarr" if "zarr" in formats else None,
             "rasters": {sid: {"path": f"zarr/rasters/{sid}.zarr", **meta} for sid, meta in rasters.items()},
         },

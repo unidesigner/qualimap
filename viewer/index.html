@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Qualimap — quality of life on the A5 grid</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css" />
+  <link rel="stylesheet" href="./style.css" />
+  <!--
+    Phase 0 viewer: no build step. Bare imports resolve through this import map (esm.sh, pinned).
+    `external=` keeps a single copy of deck.gl, Arrow, a5-js and zarrita across packages.
+    `npm run viewer` (Vite) serves the same page with local node_modules instead.
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@deck.gl/core": "https://esm.sh/@deck.gl/core@9.4.1",
+      "@deck.gl/layers": "https://esm.sh/@deck.gl/layers@9.4.1?external=@deck.gl/core",
+      "@deck.gl/geo-layers": "https://esm.sh/@deck.gl/geo-layers@9.4.1?external=@deck.gl/core,@deck.gl/layers,a5-js,apache-arrow",
+      "@deck.gl/mapbox": "https://esm.sh/@deck.gl/mapbox@9.4.1?external=@deck.gl/core",
+      "maplibre-gl": "https://esm.sh/maplibre-gl@5.6.0",
+      "a5-js": "https://esm.sh/a5-js@1.0.0",
+      "hyparquet": "https://esm.sh/hyparquet@1.33.0",
+      "hyparquet-compressors": "https://esm.sh/hyparquet-compressors@1.1.3",
+      "zarrita": "https://esm.sh/zarrita@0.7.5",
+      "apache-arrow": "https://esm.sh/apache-arrow@21.2.0",
+      "proj4": "https://esm.sh/proj4@2.19.10",
+      "@geoarrow/deck.gl-geoarrow": "https://esm.sh/@geoarrow/deck.gl-geoarrow@0.4.2?external=@deck.gl/core,@deck.gl/layers,@deck.gl/geo-layers,@deck.gl/aggregation-layers,apache-arrow",
+      "@developmentseed/deck.gl-zarr": "https://esm.sh/@developmentseed/deck.gl-zarr@0.9.0?external=@deck.gl/core,@deck.gl/layers,@deck.gl/geo-layers,zarrita,proj4",
+      "@qualimap/qm-layers": "../packages/qm-layers/src/index.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="map" role="application" aria-label="Quality-of-life map"></div>
+  <aside id="panel" aria-label="Controls">
+    <header>
+      <h1>Qualimap</h1>
+      <select id="lang" aria-label="Language">
+        <option value="en">EN</option><option value="de">DE</option><option value="fr">FR</option><option value="it">IT</option>
+      </select>
+    </header>
+    <p id="release" class="muted">Loading release…</p>
+    <fieldset id="mode">
+      <legend>Map</legend>
+      <label><input type="radio" name="mode" value="weighted" checked /> <span data-i18n="weighted">All dimensions, weighted</span></label>
+      <label><input type="radio" name="mode" value="single" /> <span data-i18n="single">One indicator</span></label>
+      <select id="indicator" aria-label="Indicator" hidden></select>
+    </fieldset>
+    <fieldset id="weights">
+      <legend data-i18n="weights">Your weights</legend>
+      <div id="sliders"></div>
+      <button id="reset" type="button" data-i18n="reset">Reset weights</button>
+    </fieldset>
+    <fieldset id="overlays">
+      <legend data-i18n="overlays">Overlays</legend>
+      <div id="raster-toggles"></div>
+      <label><input type="checkbox" id="pois" checked /> <span data-i18n="pois">Points of interest</span></label>
+      <label><input type="checkbox" id="classed" /> <span data-i18n="classed">Quintile classes</span></label>
+      <label><input type="checkbox" id="binary" /> <span data-i18n="fast">Fast polygon path</span></label>
+    </fieldset>
+    <div id="legend" aria-hidden="true"><div class="bar"></div><div class="ticks"><span>0</span><span>5</span><span>10</span></div></div>
+    <section id="details" aria-live="polite"><p class="muted" data-i18n="hover">Hover a cell for details.</p></section>
+    <footer id="attribution" class="muted"></footer>
+  </aside>
+  <div id="tooltip" role="tooltip" hidden></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

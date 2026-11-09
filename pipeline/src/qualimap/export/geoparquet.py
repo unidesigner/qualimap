@@ -56,35 +56,37 @@ def cells_to_arrow(df: pd.DataFrame) -> pa.Table:
     return pa.table(cols)
 
 
+def tile_resolution(res: int) -> int:
+    """Resolution of the A5 cells used as viewer tiles and Parquet row groups (≈1,024 cells each)."""
+    return max(res - 5, 0)
+
+
 def write_cells(df: pd.DataFrame, path: Path, res: int, release_meta: dict) -> dict:
-    """One row group per res-11 parent (coarser files: fixed 4,096-row groups)."""
+    """One row group per tile cell at ``tile_resolution(res)`` (res 16 → one per res-11 parent).
+
+    Rows are sorted by ``cell_id``; because A5 descendants are contiguous on the curve, each
+    run of equal tile parents is exactly one tile's cells.
+    """
     df = df.sort_values("cell_id", kind="stable").reset_index(drop=True)
+    tres = tile_resolution(res)
+    cells = df["cell_id"].to_numpy(np.uint64)
+    tiles = cells if tres == res else grid.parents(cells, tres)
     table = cells_to_arrow(df)
     meta = _geo_metadata(["Point"], {})
     schema = table.schema.with_metadata({
         b"geo": json.dumps(meta).encode(),
-        b"qualimap": json.dumps(release_meta | {"a5_resolution": res}).encode(),
+        b"qualimap": json.dumps(release_meta | {"a5_resolution": res, "tile_resolution": tres}).encode(),
     })
     table = table.replace_schema_metadata(schema.metadata)
     path.parent.mkdir(parents=True, exist_ok=True)
-    groups = 0
+    bounds = np.flatnonzero(np.diff(tiles)) + 1
+    starts = np.concatenate([[0], bounds]).astype(int)
+    ends = np.concatenate([bounds, [len(df)]]).astype(int)
     with pq.ParquetWriter(path, schema, compression="zstd", compression_level=9,
                           write_page_index=True, write_statistics=True) as w:
-        if res > 11 and "parent_r11" in df:
-            parents = df["parent_r11"].to_numpy(np.uint64)
-            bounds = np.flatnonzero(np.diff(parents)) + 1
-            starts = np.concatenate([[0], bounds])
-            ends = np.concatenate([bounds, [len(df)]])
-            # rows are sorted by cell_id, and res-11 descendants are contiguous, so each run of
-            # equal parents is exactly one parent's children
-            for s, e in zip(starts, ends, strict=False):
-                w.write_table(table.slice(int(s), int(e - s)))
-                groups += 1
-        else:
-            for s in range(0, len(df), 4096):
-                w.write_table(table.slice(s, min(4096, len(df) - s)))
-                groups += 1
-    return {"rows": len(df), "row_groups": groups}
+        for s, e in zip(starts, ends, strict=False):
+            w.write_table(table.slice(int(s), int(e - s)))
+    return {"rows": len(df), "row_groups": len(starts), "tile_resolution": tres}
 
 
 def write_polygons(gdf, path: Path, extra_meta: dict | None = None) -> None:
@@ -111,3 +113,62 @@ def write_points(df: pd.DataFrame, path: Path) -> None:
     table = pa.table(cols).replace_schema_metadata({b"geo": json.dumps(_geo_metadata(["Point"], {})).encode()})
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, path, compression="zstd")
+
+
+# ---------------------------------------------------------------------------- GeoArrow IPC
+def _coords_type() -> pa.DataType:
+    return pa.list_(pa.field("xy", pa.float64()), 2)
+
+
+def _geoarrow_field(name: str, ext: str, typ: pa.DataType) -> pa.Field:
+    meta = {b"ARROW:extension:name": ext.encode(), b"ARROW:extension:metadata": b'{"crs": "OGC:CRS84"}'}
+    return pa.field(name, typ, metadata=meta)
+
+
+def multipolygon_array(geoms) -> tuple[pa.Array, pa.DataType]:
+    """Interleaved geoarrow.multipolygon: list<polygons: list<rings: list<vertices: fixed_size_list<xy, 2>>>>."""
+    xy, ring_off, poly_off, geom_off = [], [0], [0], [0]
+    for g in geoms:
+        parts = list(g.geoms) if g.geom_type == "MultiPolygon" else [g]
+        for p in parts:
+            for ring in [p.exterior, *p.interiors]:
+                c = np.asarray(ring.coords)[:, :2]
+                xy.append(c)
+                ring_off.append(ring_off[-1] + len(c))
+            poly_off.append(len(ring_off) - 1)
+        geom_off.append(len(poly_off) - 1)
+    coords = np.concatenate(xy).ravel() if xy else np.empty(0)
+    verts = pa.FixedSizeListArray.from_arrays(pa.array(coords, pa.float64()), 2)
+    rings = pa.ListArray.from_arrays(pa.array(ring_off, pa.int32()), verts)
+    polys = pa.ListArray.from_arrays(pa.array(poly_off, pa.int32()), rings)
+    multi = pa.ListArray.from_arrays(pa.array(geom_off, pa.int32()), polys)
+    return multi, multi.type
+
+
+def write_geoarrow_polygons(gdf, path: Path) -> None:
+    """Arrow IPC file with an interleaved GeoArrow geometry column, for @geoarrow/deck.gl-geoarrow."""
+    import pyarrow.ipc as ipc
+
+    arr, typ = multipolygon_array(gdf.geometry.to_numpy())
+    fields = [pa.field(c, pa.array(gdf[c].to_numpy()).type) for c in gdf.columns if c != "geometry"]
+    cols = [pa.array(gdf[c].to_numpy()) for c in gdf.columns if c != "geometry"]
+    schema = pa.schema(fields + [_geoarrow_field("geometry", "geoarrow.multipolygon", typ)])
+    table = pa.Table.from_arrays(cols + [arr], schema=schema)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ipc.new_file(str(path), schema) as w:
+        w.write_table(table)
+
+
+def write_geoarrow_points(df: pd.DataFrame, path: Path) -> None:
+    import pyarrow.ipc as ipc
+
+    coords = np.column_stack([df["lon"].to_numpy(float), df["lat"].to_numpy(float)]).ravel()
+    pts = pa.FixedSizeListArray.from_arrays(pa.array(coords, pa.float64()), 2)
+    keep = [c for c in df.columns if c not in ("lon", "lat")]
+    cols = [pa.array(df[c].to_numpy() if df[c].dtype != object else df[c].astype(str).to_numpy()) for c in keep]
+    schema = pa.schema([pa.field(c, a.type) for c, a in zip(keep, cols, strict=False)]
+                       + [_geoarrow_field("geometry", "geoarrow.point", pts.type)])
+    table = pa.Table.from_arrays(cols + [pts], schema=schema)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ipc.new_file(str(path), schema) as w:
+        w.write_table(table)

@@ -51,6 +51,7 @@ def test_full_run(qm_env, mocked, upstream):
     geo = json.loads(pf.schema_arrow.metadata[b"geo"])
     assert geo["columns"]["geometry"]["encoding"] == "WKB"
     assert "covering" in geo["columns"]["geometry"]
+    assert json.loads(pf.schema_arrow.metadata[b"qualimap"])["tile_resolution"] == 11
     stats = [pf.metadata.row_group(i).column(0).statistics for i in range(pf.num_row_groups)]
     for a, b in zip(stats, stats[1:], strict=False):
         assert a.max < b.min  # row groups do not overlap in cell_id
@@ -78,7 +79,7 @@ def test_full_run(qm_env, mocked, upstream):
     # ---- zarr
     g = zarr.open_group(str(env.pub.local_path(f"releases/{v}/zarr/qualimap.zarr")), mode="r")
     assert g["r16"].attrs["dggs"]["name"] == "a5"
-    pidx = g["r16/parent_index"][:]
+    pidx = g["r16/tile_index"][:]
     assert int(pidx[:, 1].sum()) == g["r16/cell_ids"].shape[0]
 
     # ---- catalog.json for the viewer

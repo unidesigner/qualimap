@@ -1,0 +1,26 @@
+{
+  "name": "qualimap",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "npm --workspace @qualimap/qm-layers test",
+    "viewer": "vite viewer --port 5173",
+    "web:dev": "npm --workspace @qualimap/web run dev",
+    "web:build": "npm --workspace @qualimap/web run build"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0",
+    "maplibre-gl": "^5.6.0",
+    "@deck.gl/mapbox": "^9.4.1"
+  },
+  "overrides": {
+    "a5-js": "$a5-js"
+  },
+  "dependencies": {
+    "a5-js": "^1.0.0"
+  }
+}

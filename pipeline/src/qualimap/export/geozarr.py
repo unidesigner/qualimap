@@ -15,6 +15,8 @@ import pandas as pd
 import zarr
 from zarr.codecs import ZstdCodec
 
+from .. import grid
+
 DGGS_CONVENTION = {
     "uuid": "7b255807-140c-42ca-97f6-7a1cfecdbc38",
     "name": "dggs",
@@ -70,12 +72,13 @@ def write_dggs(tables: dict[int, pd.DataFrame], path: Path, indicators: list[str
         for i in indicators:
             _array(g, f"q_{i}", df[f"q_{i}"].to_numpy(np.uint8), attrs={"_FillValue": 255, "scale": 25})
             _array(g, f"raw_{i}", df[f"raw_{i}"].to_numpy(np.float32))
-        if res > 11 and "parent_r11" in df:
-            parents = df["parent_r11"].to_numpy(np.uint64)
-            keys, first, counts = np.unique(parents, return_index=True, return_counts=True)
-            _array(g, "parent_ids", keys)
-            _array(g, "parent_index", np.column_stack([first, counts]).astype(np.uint64), chunks=(CHUNK, 2))
-        g.attrs["qualimap"] = dim | {"rows": len(df)}
+        tres = max(res - 5, 0)
+        cells = df["cell_id"].to_numpy(np.uint64)
+        parents = cells if tres == res else grid.parents(cells, tres)
+        keys, first, counts = np.unique(parents, return_index=True, return_counts=True)
+        _array(g, "tile_ids", keys)
+        _array(g, "tile_index", np.column_stack([first, counts]).astype(np.uint64), chunks=(CHUNK, 2))
+        g.attrs["qualimap"] = dim | {"rows": len(df), "tile_resolution": tres}
         info[res] = len(df)
     return info
 
