@@ -176,10 +176,33 @@ Rules that follow from the A5 and extension documentation:
   (centre containment, the default) assigns interior cells in one pass; cells from the
   `overlapping := true` covering that are not in the default covering are boundary cells, and
   only those get exact area shares via `ST_Intersection(a5_cell_to_geometry(cell_id), geom)`.
-- **Neighbourhoods** (green share within 300 m): `a5_spherical_cap(cell_id, 300)` returns the
-  cells within a metric radius, so no step count has to be derived from the edge length.
-  `a5_grid_disk(cell_id, k)` is used where a topological neighbourhood is wanted (smoothing,
-  gap filling).
+- **Neighbourhoods** (for example green share within 300 m). Two methods, chosen per
+  indicator with `neighbourhood.method` in the catalog:
+
+  | Method | Call | Selects | Strength |
+  | --- | --- | --- | --- |
+  | `spherical_cap` (default) | `a5_spherical_cap(cell_id, radius_m)` | Cells whose centre lies within `radius_m` | Closest to a true circle; area matches π·r² |
+  | `grid_disk` | `a5_grid_disk(cell_id, k)` | Cells within k edge steps | Topological: integer, symmetric, stable across builds; natural for adjacency, smoothing and gap filling |
+  | `grid_disk_vertex` | `a5_grid_disk_vertex(cell_id, k)` | Cells within k vertex steps (also corner neighbours) | Rounder than edge steps at the same k |
+
+  For `grid_disk*`, k is either given explicitly or derived from `radius_m`: the pipeline
+  picks the k whose **equivalent radius** √(n·A/π) (n = cells in the disk, A = cell area) is
+  closest to `radius_m`. Measured at res 16 with `pya5` 1.0.0 (mean over five Swiss locations):
+
+  | Neighbourhood at res 16 | Cells | Equivalent radius | Farthest centre |
+  | --- | --- | --- | --- |
+  | `grid_disk` k = 2 | 17 | 207 m | 224 m |
+  | `grid_disk` k = 3 | 33 | 288 m | 337 m |
+  | `grid_disk` k = 4 | 54 | 369 m | 447 m |
+  | `grid_disk_vertex` k = 2 | 23 | 241 m | 273 m |
+  | `grid_disk_vertex` k = 3 | 47 | 344 m | 410 m |
+  | `spherical_cap` r = 300 m | 37 | 305 m | 292 m |
+  | Ideal 300 m circle | 35.7 | 300 m | 300 m |
+
+  So 300 m maps to `grid_disk` k = 3 (eq. radius 288 m). The disk is less round than the
+  cap: its farthest centre is 17% beyond its equivalent radius versus 4% inside for the cap.
+  `qm qa run --compare-neighbourhoods <indicator>` computes the indicator both ways and
+  reports the per-cell and per-commune differences, so the choice can be made on data.
 - Joining on `cell_id` replaces geometric predicates everywhere after this step; the
   extension authors note that probing an indexed cell column is much cheaper than
   `ST_DWithin` or `ST_Intersects` on raw geometries.

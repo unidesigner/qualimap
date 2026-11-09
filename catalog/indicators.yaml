@@ -484,7 +484,10 @@ indicators:
       fn: qualimap.transforms.green:neighbourhood_shares
       version: 1
       params:
-        radius_m: 300                # neighbourhood via a5_spherical_cap(cell_id, radius_m)
+        neighbourhood:
+          method: spherical_cap      # spherical_cap | grid_disk | grid_disk_vertex
+          radius_m: 300              # for grid_disk*: k derived from radius (300 m -> k = 3 at res 16)
+          # k: 3                     # optional explicit step count for grid_disk*, overrides radius_m
         class_map: catalog/maps/nolc04_classes.csv
         blend: {green_share: 0.4, canopy_share: 0.3, sealed_share: 0.3}
         linear:
